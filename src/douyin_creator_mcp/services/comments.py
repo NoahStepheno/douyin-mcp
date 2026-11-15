@@ -8,7 +8,6 @@ the response contract. No comment is persisted: v1 returns them directly.
 from __future__ import annotations
 
 import json
-import math
 import random
 import re
 import time
@@ -39,7 +38,11 @@ from ..errors import (
 )
 from .browser_service import BROWSER_DEFAULT_ACCOUNT_ID
 from .comment_insights import build_insights, load_keyword_rules
-from .risk_state import RiskCooldown, SkippedEventLog
+from .risk_state import (
+    RiskCooldown,
+    SkippedEventLog,
+    build_cooldown_skip_payload,
+)
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 COMMENT_GUARD_FILENAME = "comment_collection_guard.json"
@@ -73,10 +76,6 @@ RATE_LIMITED_MESSAGE = (
 REASON_MESSAGES = {
     "comments_disabled": (
         "该作品评论区已关闭（作者关闭了评论），没有可采集的评论。"
-    ),
-    "risk_control_cooldown": (
-        "账号处于风控冷却期，本次不访问平台（不消耗请求）；"
-        "请等待冷却到期，或人工确认安全后运行 douyin-mcp clear-cooldown --yes。"
     ),
     "video_not_public": (
         "该作品的公开页不存在（已删除、仅自己可见或未公开），"
@@ -758,20 +757,9 @@ class CommentsService:
     ) -> dict[str, Any]:
         fetched_at = self._now().astimezone(SHANGHAI)
         rules, rule_version, _ = load_keyword_rules(self.settings.data_dir)
-        remaining = int(cooldown.get("remaining_seconds") or 0)
-        hours = max(1, math.ceil(remaining / 3600)) if remaining else 0
         return {
             **self._base_payload(video_id, fetched_at),
-            "status": "skipped",
-            "error_code": "RISK_CONTROL_COOLDOWN",
-            "reason": "risk_control_cooldown",
-            "retryable": False,
-            "cooldown_until": cooldown.get("cooldown_until"),
-            "remaining_seconds": remaining,
-            "message": (
-                f"账号风控冷却中，剩余约 {hours} 小时（{remaining} 秒）；"
-                + REASON_MESSAGES["risk_control_cooldown"]
-            ),
+            **build_cooldown_skip_payload(cooldown),
             "comments": [],
             "total": 0,
             "total_comment_count": None,
@@ -780,7 +768,6 @@ class CommentsService:
             "has_more": False,
             "next_cursor": None,
             "insights": build_insights([], rules, rule_version),
-            "warnings": [],
         }
 
     def _rate_limited_result(

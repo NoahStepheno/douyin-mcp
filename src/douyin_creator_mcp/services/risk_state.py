@@ -23,6 +23,22 @@ RISK_COOLDOWN_VERSION = 1
 SKIPPED_EVENTS_VERSION = 1
 DEFAULT_ACCOUNT_ID = "browser-default"
 SKIPPED_WINDOW_DAYS = 7
+RISK_COOLDOWN_REASON = "risk_control_cooldown"
+RISK_COOLDOWN_ERROR_CODE = "RISK_CONTROL_COOLDOWN"
+COOLDOWN_SKIP_FIELDS = (
+    "status",
+    "reason",
+    "error_code",
+    "retryable",
+    "cooldown_until",
+    "remaining_seconds",
+    "message",
+    "warnings",
+)
+COOLDOWN_MESSAGE_TEMPLATE = (
+    "账号风控冷却中，剩余约 {hours} 小时（{remaining} 秒），本次未访问平台；"
+    "请等待冷却到期或人工确认后运行 douyin-mcp clear-cooldown --yes。"
+)
 RISK_COOLDOWN_SCHEMA: dict[str, Any] = {
     "version": 1,
     "entries": {
@@ -34,6 +50,34 @@ RISK_COOLDOWN_SCHEMA: dict[str, Any] = {
         }
     },
 }
+
+
+def build_cooldown_skip_payload(
+    cooldown: dict[str, Any], **extra: Any
+) -> dict[str, Any]:
+    """Single definition of the cooldown skipped payload (message + fields).
+
+    Callers merge their own extras (``video_id`` / ``scope`` ...) and are
+    responsible for recording the skipped event exactly once. This builder never
+    records anything.
+    """
+
+    remaining = max(0, int(cooldown.get("remaining_seconds") or 0))
+    hours = (remaining + 3599) // 3600 if remaining else 0
+    payload: dict[str, Any] = {
+        "status": "skipped",
+        "reason": RISK_COOLDOWN_REASON,
+        "error_code": RISK_COOLDOWN_ERROR_CODE,
+        "retryable": False,
+        "cooldown_until": cooldown.get("cooldown_until"),
+        "remaining_seconds": remaining,
+        "message": COOLDOWN_MESSAGE_TEMPLATE.format(
+            hours=hours, remaining=remaining
+        ),
+        "warnings": [],
+    }
+    payload.update(extra)
+    return payload
 
 
 def _display_path(path: Path) -> str:
@@ -107,6 +151,7 @@ class RiskCooldown:
             "state_filename": RISK_COOLDOWN_FILENAME,
             "schema": RISK_COOLDOWN_SCHEMA,
             "account_id": self.account_id,
+            "blocked_scope": "comments_only",
             "active": False,
             "cooldown_until": None,
             "remaining_seconds": 0,

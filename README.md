@@ -409,11 +409,12 @@ PYENV_VERSION=3.11.11 .venv/bin/python scripts/probe_comment_dom.py \
 
 ### 风控冷却与跳过计数
 
-任一采集（当前为评论采集）返回 `aborted_risk_control` 后，写入**账号级**冷却状态（`DATA_DIR/risk_cooldown.json`，
+任一采集（评论采集，或列表/详情同步自身撞到验证）返回风控信号后，写入**账号级**冷却状态（`DATA_DIR/risk_cooldown.json`，
 单账号一条，不按采集类型分组），默认 **12 小时**，可用 `DOUYIN_RISK_COOLDOWN_HOURS` 配置为
 `6` / `12` / `24`（其它值启动即报 configuration_error）。冷却到期自动失效，无需人工清理。
 
-冷却期内任何采集（评论、作品列表同步、作品详情同步）直接返回，**不启动浏览器、不消耗任何请求**：
+冷却只阻断**评论采集**（列表/详情同步不打开评论页，风险面不同，冷却期内**照常执行**）。
+评论采集在冷却期内直接返回，**不启动浏览器、不消耗任何请求**：
 
 ```jsonc
 {
@@ -430,9 +431,11 @@ PYENV_VERSION=3.11.11 .venv/bin/python scripts/probe_comment_dom.py \
 - 冷却不影响只读诊断：`login_status`、`get_status`、本地缓存/DB 查询照常可用。
 - `douyin-mcp clear-cooldown --yes` 是**唯一**解除方式（人工确认后调用，必须显式 `--yes`）；
   实现中没有自动清除路径。该命令也能清掉手工写入的状态文件。
+- `risk_control_cooldown` 计数只统计被冷却拦截的**评论采集**次数；列表/详情同步不会被该冷却拦截。
 - `skipped` 不计失败率、覆盖率缺口与告警，但会计数：`get_status` 返回近 7 日滚动计数，例如
   `"skipped_last_7d": {"risk_control_cooldown": 2, "video_not_public": 1}`。
-- `get_status.risk_cooldown` 暴露 `state_path`、`schema`、`active`、`cooldown_until`、`remaining_seconds`，
+- `get_status.risk_cooldown` 暴露 `state_path`、`schema`、`active`、`blocked_scope`（当前固定 `comments_only`）、
+  `cooldown_until`、`remaining_seconds`，
   便于人工按 schema 注入状态做验收（坏文件/缺字段/时间格式错/已过期一律按“无冷却”处理并给 warning，不报错、不放宽）。
 - 最终 URL 与请求 URL 不一致且不属于已知 404 形态时，`warnings` 会写入脱敏后的 `final_url`：
   只保留 path 与 query 的键，例如 `final_url=/jingxuan?previous_page`，不写 query 值。

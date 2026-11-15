@@ -16,8 +16,11 @@ from douyin_creator_mcp.errors import AppError
 from douyin_creator_mcp.services.browser_service import BrowserService
 from douyin_creator_mcp.services.comments import CommentsService
 from douyin_creator_mcp.services.risk_state import (
+    COOLDOWN_MESSAGE_TEMPLATE,
+    COOLDOWN_SKIP_FIELDS,
     RiskCooldown,
     SkippedEventLog,
+    build_cooldown_skip_payload,
 )
 
 from .fixtures import FakeExecutor, make_comment, make_observation
@@ -162,6 +165,7 @@ def test_read_only_get_status_is_exempt_but_reports_cooldown(
     assert status["risk_cooldown"]["active"] is True
     assert status["risk_cooldown"]["remaining_seconds"] == 12 * 3600
     assert status["risk_cooldown"]["state_path"].endswith("risk_cooldown.json")
+    assert status["risk_cooldown"]["blocked_scope"] == "comments_only"
     assert "schema" in status["risk_cooldown"]
     assert status["skipped_last_7d"] == {"risk_control_cooldown": 1}
 
@@ -466,12 +470,34 @@ def test_login_status_is_read_only_exempt_during_cooldown(
     assert status["login_status"] == "not_started"
 
 
-def test_sync_collection_is_blocked_by_cooldown_without_browser(
-    settings: Any,
-) -> None:
+def test_sync_is_not_blocked_by_comment_cooldown(settings: Any) -> None:
     clock = Clock()
     cooldown = RiskCooldown(settings.data_dir, now=clock)
     cooldown.activate(12)
+    log = SkippedEventLog(settings.data_dir, now=clock)
+    service = BrowserService(
+        settings,
+        FakeDB(),  # type: ignore[arg-type]
+        risk_cooldown=cooldown,
+        skipped_log=log,
+    )
+
+    # No compliance ack in this temp DATA_DIR, so the sync must reach the
+    # compliance gate instead of being short-circuited by the comment cooldown.
+    with pytest.raises(AppError) as excinfo:
+        service.sync_creator_data()
+    assert excinfo.value.error_type == "platform_terms_acknowledgement_required"
+    with pytest.raises(AppError) as excinfo:
+        service.sync_video_details()
+    assert excinfo.value.error_type == "platform_terms_acknowledgement_required"
+
+    assert cooldown.status()["active"] is True
+    assert log.counts_last_7d() == {}
+
+
+def test_sync_verification_activates_shared_cooldown(settings: Any) -> None:
+    clock = Clock()
+    cooldown = RiskCooldown(settings.data_dir, now=clock)
     service = BrowserService(
         settings,
         FakeDB(),  # type: ignore[arg-type]
@@ -479,16 +505,12 @@ def test_sync_collection_is_blocked_by_cooldown_without_browser(
         skipped_log=SkippedEventLog(settings.data_dir, now=clock),
     )
 
-    list_result = service.sync_creator_data()
-    details_result = service.sync_video_details()
-
-    for result in (list_result, details_result):
-        assert result["status"] == "skipped"
-        assert result["reason"] == "risk_control_cooldown"
-        assert result["retryable"] is False
-    # No browser session/executor was created by either call.
-    assert service._session is None
-    assert service._browser_executor is None
+    service._activate_cooldown_on_verification("logged_in")
+    assert cooldown.status()["active"] is False
+    service._activate_cooldown_on_verification("login_required")
+    assert cooldown.status()["active"] is False
+    service._activate_cooldown_on_verification("verification_required")
+    assert cooldown.status()["active"] is True
 
 
 def test_skipped_counter_increments_exactly_once_per_call(
@@ -521,18 +543,55 @@ def test_skipped_counter_increments_exactly_once_per_call(
     }
     assert len(executor.commands) == 2
 
-    # The sync path also records once per blocked call.
+    # List/detail sync is not blocked by a comment cooldown, so it must not
+    # produce a skipped event (it fails later at the compliance gate here).
     browser_service = BrowserService(
         settings,
         FakeDB(),  # type: ignore[arg-type]
         risk_cooldown=RiskCooldown(settings.data_dir, now=clock),
         skipped_log=log,
     )
-    browser_service.sync_creator_data()
-    assert log.counts_last_7d()["risk_control_cooldown"] == 2
+    with pytest.raises(AppError):
+        browser_service.sync_creator_data()
+    assert log.counts_last_7d() == {
+        "risk_control_cooldown": 1,
+        "video_not_public": 1,
+    }
 
     # And get_status reports exactly those counters.
     assert browser_service.get_status()["skipped_last_7d"] == {
-        "risk_control_cooldown": 2,
+        "risk_control_cooldown": 1,
         "video_not_public": 1,
     }
+
+
+def test_cooldown_message_is_single_sentence(settings: Any) -> None:
+    clock = Clock()
+    RiskCooldown(settings.data_dir, now=clock).activate(12)
+    service, _ = _service(settings, {}, clock)
+
+    message = service.get_video_comments(OTHER_VIDEO_ID)["message"]
+
+    assert message == COOLDOWN_MESSAGE_TEMPLATE.format(
+        hours=12, remaining=12 * 3600
+    )
+    assert message.count("账号风控冷却中") == 1
+    assert message.count("本次未访问平台") == 1
+    assert "账号处于风控冷却期" not in message
+    assert "（不消耗请求）" not in message
+    assert len(message) < 160
+
+
+def test_cooldown_payload_fields_match_shared_builder(settings: Any) -> None:
+    clock = Clock()
+    cooldown = RiskCooldown(settings.data_dir, now=clock)
+    cooldown.activate(6)
+    service, _ = _service(settings, {}, clock)
+
+    result = service.get_video_comments(OTHER_VIDEO_ID)
+    canonical = build_cooldown_skip_payload(cooldown.status())
+
+    assert set(canonical) == set(COOLDOWN_SKIP_FIELDS)
+    for field in COOLDOWN_SKIP_FIELDS:
+        assert result[field] == canonical[field], field
+    assert set(COOLDOWN_SKIP_FIELDS) <= result.keys()

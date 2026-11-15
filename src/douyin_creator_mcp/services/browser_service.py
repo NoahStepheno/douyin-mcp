@@ -186,28 +186,6 @@ class BrowserService:
             ],
         }
 
-    def _cooldown_skipped_payload(self, **extra: Any) -> dict[str, Any] | None:
-        """Build a skipped payload; recording is the caller's single job."""
-
-        state = self._risk_cooldown.status()
-        if not state.get("active"):
-            return None
-        remaining = int(state.get("remaining_seconds") or 0)
-        return {
-            "status": "skipped",
-            "reason": "risk_control_cooldown",
-            "error_code": "RISK_CONTROL_COOLDOWN",
-            "retryable": False,
-            "cooldown_until": state.get("cooldown_until"),
-            "remaining_seconds": remaining,
-            "message": (
-                "账号处于风控冷却期，本次不访问平台（不消耗请求）；"
-                "请等待冷却到期，或人工确认安全后运行 douyin-mcp clear-cooldown --yes。"
-            ),
-            "warnings": [],
-            **extra,
-        }
-
     def sync_if_needed(
         self,
         scope: str = "list",
@@ -296,12 +274,6 @@ class BrowserService:
         mode: str = "visible",
         force: bool = False,
     ) -> dict[str, Any]:
-        cooldown_skip = self._cooldown_skipped_payload(
-            account_id=account_id, mode=mode, scope="details"
-        )
-        if cooldown_skip is not None:
-            self._skipped_log.record("risk_control_cooldown")
-            return cooldown_skip
         require_platform_risk_acknowledgement(self.settings.data_dir)
         self._validate_mode(mode)
         del force  # A full list sync is already idempotent at the video identity layer.
@@ -388,6 +360,7 @@ class BrowserService:
                     "phase": "list_sync",
                 }
                 self._finish_job(job_id, job_status, progress=progress, coverage=coverage)
+                self._activate_cooldown_on_verification(snapshot["login_status"])
                 warnings = self._sync_notes(snapshot["login_status"], job_status)
                 return {
                     "sync_job_id": job_id,
@@ -442,12 +415,6 @@ class BrowserService:
         mode: str = "visible",
         account_id: str = BROWSER_DEFAULT_ACCOUNT_ID,
     ) -> dict[str, Any]:
-        cooldown_skip = self._cooldown_skipped_payload(
-            account_id=account_id, mode=mode, scope="details"
-        )
-        if cooldown_skip is not None:
-            self._skipped_log.record("risk_control_cooldown")
-            return cooldown_skip
         require_platform_risk_acknowledgement(self.settings.data_dir)
         self._validate_mode(mode)
         if video_ids is not None and not 1 <= len(video_ids) <= 50:
@@ -549,6 +516,8 @@ class BrowserService:
                         )
                         continue
                     login_status = detail["login_status"]
+                    if login_status == VERIFICATION_REQUIRED:
+                        self._activate_cooldown_on_verification(login_status)
                     if login_status in {LOGIN_REQUIRED, VERIFICATION_REQUIRED}:
                         if mode == "background_first":
                             self.close_browser()
@@ -1959,6 +1928,19 @@ class BrowserService:
     @staticmethod
     def _job_status_from_login_status(login_status: str) -> str:
         return "user_action_required" if login_status in {LOGIN_REQUIRED, VERIFICATION_REQUIRED} else "completed"
+
+    def _activate_cooldown_on_verification(self, login_status: str) -> None:
+        """A sync that itself hits verification still arms the shared cooldown.
+
+        The cooldown only blocks comment collection later; list/detail sync is
+        never pre-blocked by a comment cooldown.
+        """
+
+        if login_status != VERIFICATION_REQUIRED:
+            return
+        self._risk_cooldown.activate(
+            int(getattr(self.settings, "douyin_risk_cooldown_hours", 12))
+        )
 
     @staticmethod
     def _login_next_action(login_status: str) -> dict[str, Any] | None:

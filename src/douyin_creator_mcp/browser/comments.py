@@ -1,32 +1,36 @@
-"""Visible-DOM comment panel reader for Douyin video pages.
+"""Visible comment panel reading for Douyin video pages (parser v2).
 
-This module only reads what the page has already rendered. It never calls a
-private endpoint, never bypasses a verification challenge and never retries a
-risk-control prompt. Every retry-sensitive decision is surfaced to the caller
-via the ``state`` field instead.
+The public video URL redirects to the ``/jingxuan?modal_id=...`` layer where the
+comment drawer is **closed**, so the panel must be opened before any comment
+node exists. Opening, wait signals and structural item extraction live in
+``browser/comment_panel.py`` and are shared with ``scripts/probe_comment_dom.py``.
 
 Observation contract (returned by :func:`collect_comments`)::
 
     {
       "state": "comments" | "empty" | "risk_control" | "login_required" | "unknown",
-      "container_found": bool,       # comment list container matched a selector
-      "items": [normalized comment], # window [cursor_offset : cursor_offset + limit]
-      "raw_item_count": int,         # number of items in that window
-      "total_comment_count": int | None,  # platform-declared total, never estimated
-      "exhausted": bool,             # no more items can be loaded in this page
-      "read_count": int,             # DOM reads performed (diagnostics only)
-      "parser_version": "comment-panel-v1",
+      "reason": None | "panel_not_opened" | "panel_opened_but_no_items" | "selectors_not_matched",
+      "panel_found": bool,
+      "opened_by": str | None,       # trigger strategy that opened the drawer
+      "items": [normalized comment],
+      "raw_item_count": int,
+      "seen_item_count": int,
+      "dropped_item_count": int,
+      "total_comment_count": int | None,
+      "exhausted": bool,
+      "read_count": int,
+      "parser_version": "comment-panel-v2",
     }
 
-Comment field missing semantics (v1):
+Comment field missing semantics (unchanged from v1):
 
 * ``comment_id``: platform attribute when present, otherwise a stable local
-  digest of video id + nickname + content + raw time text. Never a user id.
+  digest of video id + nickname + content + raw time text.
 * ``author_nickname``: ``""`` when the panel does not render a nickname.
 * ``like_count`` / ``reply_count``: ``None`` when not displayed; never faked 0.
-* ``posted_at``: ``None`` when the text cannot be parsed; ``posted_at_precision``
-  is then ``"unknown"``. Relative texts are back-dated from ``fetched_at`` and
-  marked ``"approx"``. Full date+time texts are marked ``"exact"``.
+* ``posted_at``: ``None`` when unparseable; precision ``"unknown"`` then.
+  Relative texts are back-dated from ``fetched_at`` and marked ``"approx"``;
+  full date+time texts are ``"exact"``.
 """
 
 from __future__ import annotations
@@ -37,12 +41,19 @@ from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
-COMMENT_PARSER_VERSION = "comment-panel-v1"
+from .comment_panel import (
+    open_comment_panel,
+    read_comment_items,
+    read_page_signals,
+    scroll_comment_panel,
+)
+
+COMMENT_PARSER_VERSION = "comment-panel-v2"
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 #: Upper bound shared by the MCP tool and the collector (ticket section 2).
 MAX_COMMENT_LIMIT = 200
-#: Internal page size: scroll in blocks of this many comments.
+#: Internal page size: scroll/read in blocks of this many comments.
 COMMENT_PAGE_SIZE = 50
 #: Hard cap on scroll rounds per collection to keep one call bounded.
 MAX_SCROLL_ROUNDS = 40
@@ -53,197 +64,9 @@ STATE_RISK_CONTROL = "risk_control"
 STATE_LOGIN_REQUIRED = "login_required"
 STATE_UNKNOWN = "unknown"
 
-
-_COMMENT_PANEL_SCRIPT = r"""
-() => {
-  const norm = value => (value || '').replace(/\s+/g, ' ').trim();
-  const body = document.body;
-  const pageText = norm(body ? body.innerText : '');
-  const visible = el => {
-    if (!el) return false;
-    if (el.getAttribute && el.getAttribute('aria-hidden') === 'true') return false;
-    if (window.getComputedStyle) {
-      const style = window.getComputedStyle(el);
-      if (style && (style.display === 'none' || style.visibility === 'hidden')) return false;
-    }
-    return true;
-  };
-  const textOf = node => norm(node ? (node.innerText || '') : '');
-
-  const riskText = /(滑块验证|拖动滑块|请完成验证|安全验证|人机验证|操作频繁|访问频繁|异常流量|检测到风险)/;
-  const loginText = /(扫码登录|登录后查看|请先登录|手机号登录|验证码登录|登录后参与评论)/;
-  const emptyText = /(暂无评论|还没有评论|来抢首评|暂时没有评论|还没有人评论)/;
-  const endText = /(没有更多评论|已显示全部评论|到底了|暂无更多评论)/;
-  const moreText = /(展开更多|查看更多评论|加载更多评论|查看全部评论)/;
-
-  const riskSelectors = [
-    '#captcha_container', '[id*="captcha"]', '[class*="captcha"]',
-    '[data-e2e*="captcha"]', '[class*="verify-wrap"]', '[class*="verify_modal"]',
-    '[class*="verifyModal"]'
-  ];
-  const riskElement = riskSelectors.some(sel => {
-    try {
-      return [...document.querySelectorAll(sel)].some(visible);
-    } catch (error) {
-      return false;
-    }
-  });
-
-  const containerSelectors = [
-    '[data-e2e="comment-list"]', '[class*="comment-list"]',
-    '[class*="commentList"]', '[class*="comment-panel"]',
-    '[class*="commentPanel"]', '[class*="comment-container"]'
-  ];
-  let container = null;
-  for (const sel of containerSelectors) {
-    const node = document.querySelector(sel);
-    if (node && visible(node)) { container = node; break; }
-  }
-
-  const itemSelectors = [
-    '[data-e2e="comment-item"]', '[class*="comment-item"]',
-    '[class*="commentItem"]'
-  ];
-  let itemNodes = [];
-  let matchedItemSelector = '';
-  for (const sel of itemSelectors) {
-    const nodes = [...document.querySelectorAll(sel)].filter(visible);
-    if (nodes.length) { itemNodes = nodes; matchedItemSelector = sel; break; }
-  }
-  itemNodes = itemNodes.filter(node =>
-    !itemNodes.some(other => other !== node && other.contains(node))
-  );
-
-  const leafTexts = root => [...root.querySelectorAll('*')]
-    .filter(el => el.children.length === 0)
-    .map(el => norm(el.innerText))
-    .filter(Boolean);
-
-  const firstText = (root, selectors) => {
-    for (const sel of selectors) {
-      const node = root.querySelector(sel);
-      if (node) {
-        const text = textOf(node);
-        if (text) return text;
-      }
-    }
-    return '';
-  };
-
-  const timePattern = /^(刚刚|\d+\s*(秒|分钟|小时|天|周|个月|年)前|(今天|昨天|前天)\s*\d{1,2}:\d{2}|\d{1,2}-\d{1,2}(\s+\d{1,2}:\d{2})?|\d{4}[-年]\d{1,2}[-月]\d{1,2}日?(\s+\d{1,2}:\d{2})?|\d{1,2}:\d{2})$/;
-  const countPattern = /(\d+(?:\.\d+)?)\s*([万亿]?)/;
-
-  const items = itemNodes.map(node => {
-    const itemText = textOf(node);
-    const leaves = leafTexts(node);
-    const commentId = node.getAttribute('data-comment-id') ||
-      node.getAttribute('data-id') ||
-      (node.id && /^\d{6,}$/.test(node.id) ? node.id : '') || '';
-    let content = firstText(node, [
-      '[data-e2e="comment-content"]', '[class*="comment-content"]',
-      '[class*="commentContent"]', '[class*="comment-main"]'
-    ]);
-    if (!content) {
-      const nickname = firstText(node, [
-        '[data-e2e="comment-author"]', '[class*="user-name"]',
-        '[class*="nickname"]', 'a[href*="/user/"]'
-      ]);
-      const candidates = leaves.filter(text =>
-        text !== nickname && !timePattern.test(text) && !/^\d+(\.\d+)?\s*[万亿]?$/.test(text)
-      );
-      candidates.sort((a, b) => b.length - a.length);
-      content = candidates.length ? candidates[0] : '';
-    }
-    const nickname = firstText(node, [
-      '[data-e2e="comment-author"]', '[class*="user-name"]',
-      '[class*="nickname"]', 'a[href*="/user/"]'
-    ]);
-    const timeText = leaves.find(text => timePattern.test(text)) || '';
-    const likeText = firstText(node, [
-      '[data-e2e="comment-like-count"]', '[class*="like-count"]',
-      '[class*="likeCount"]', '[class*="digg"]'
-    ]);
-    const replyMatch = itemText.match(/(\d+)\s*条?回复/);
-    const authorTag = [...node.querySelectorAll(
-      '[data-e2e*="author-tag"], [class*="author-tag"], [class*="authorTag"], [class*="badge"]'
-    )].some(el => textOf(el) === '作者');
-    const pinned = /(^|\s)置顶/.test(itemText) ||
-      Boolean(node.querySelector('[class*="pin"], [data-e2e*="top"]'));
-    return {
-      comment_id: commentId,
-      content,
-      nickname,
-      like_text: likeText,
-      reply_text: replyMatch ? replyMatch[1] : '',
-      time_text: timeText,
-      is_pinned: pinned,
-      is_author_reply: authorTag
-    };
-  });
-
-  const containerText = norm(container ? container.innerText : '');
-  const headerText = firstText(document, [
-    '[data-e2e="comment-count"]', '[class*="comment-count"]',
-    '[class*="commentCount"]', '[class*="comment-title"]',
-    '[class*="commentTitle"]'
-  ]);
-  let totalCommentCount = null;
-  const countSource = headerText || containerText.slice(0, 160) || pageText.slice(0, 160);
-  const explicitTotal = countSource.match(/(?:共\s*)?([\d][\d,.]*)\s*条评论/);
-  if (explicitTotal) {
-    const numeric = Number(explicitTotal[1].replace(/[,.]/g, ''));
-    if (Number.isFinite(numeric)) totalCommentCount = numeric;
-  }
-
-  let state = 'unknown';
-  if (riskElement || riskText.test(pageText)) state = 'risk_control';
-  else if (loginText.test(pageText) && items.length === 0) state = 'login_required';
-  else if (items.length || container) {
-    state = items.length ? 'comments' : (emptyText.test(pageText) ? 'empty' : 'unknown');
-  } else if (emptyText.test(pageText)) {
-    state = 'empty';
-  }
-
-  let hasMoreHint = null;
-  if (endText.test(pageText)) hasMoreHint = false;
-  else if (moreText.test(pageText)) hasMoreHint = true;
-
-  return {
-    state,
-    container_found: Boolean(container),
-    matched_item_selector: matchedItemSelector,
-    items,
-    total_comment_count: totalCommentCount,
-    has_more_hint: hasMoreHint,
-    page_text: pageText.slice(0, 400)
-  };
-}
-"""
-
-_SCROLL_COMMENT_PANEL_SCRIPT = r"""
-() => {
-  const candidates = [
-    '[data-e2e="comment-list"]', '[class*="comment-list"]',
-    '[class*="commentList"]', '[class*="comment-panel"]',
-    '[class*="commentPanel"]'
-  ];
-  for (const sel of candidates) {
-    const node = document.querySelector(sel);
-    if (node && node.scrollHeight > node.clientHeight + 4) {
-      node.scrollTop = node.scrollHeight;
-      return 'panel';
-    }
-  }
-  window.scrollTo(0, document.documentElement.scrollHeight);
-  return 'window';
-}
-"""
-
-def read_comment_panel(page: Any) -> dict[str, Any]:
-    """Read one snapshot of the visible comment panel without any retry."""
-
-    raw = page.evaluate(_COMMENT_PANEL_SCRIPT)
-    return raw if isinstance(raw, dict) else {}
+REASON_PANEL_NOT_OPENED = "panel_not_opened"
+REASON_PANEL_OPENED_BUT_NO_ITEMS = "panel_opened_but_no_items"
+REASON_SELECTORS_NOT_MATCHED = "selectors_not_matched"
 
 
 def _parse_count_text(value: Any) -> int | None:
@@ -432,11 +255,13 @@ def collect_comments(
     settle_ms: int = 600,
     max_scroll_rounds: int = MAX_SCROLL_ROUNDS,
     page_size: int = COMMENT_PAGE_SIZE,
+    panel_opener: Any | None = None,
 ) -> dict[str, Any]:
-    """Read the visible comment panel, stopping on any risk-control prompt.
+    """Open the comment drawer and read its rendered items.
 
-    Risk control is checked on the very first read and after every scroll. Once
-    detected the function returns immediately; no retry, no second navigation.
+    A risk-control or login signal is checked before any click and again after
+    every scroll. Once detected the function returns immediately; no strategy
+    retry and no second navigation happens afterwards.
     """
 
     if limit < 1:
@@ -447,94 +272,127 @@ def collect_comments(
     window_end = cursor_offset + limit
     buffer_size = max(window_end, page_size)
 
+    opener = panel_opener or open_comment_panel
+    read_count = 0
     ordered: dict[str, dict[str, Any]] = {}
     ordered_items: list[dict[str, Any]] = []
     total_comment_count: int | None = None
     state = STATE_UNKNOWN
-    container_found = False
+    reason: str | None = None
+    panel_found = False
+    opened_by: str | None = None
     exhausted = False
     has_more_hint: bool | None = None
-    read_count = 0
     stable_rounds = 0
     previous_count = -1
     scroll_rounds = 0
     dropped = 0
 
-    while True:
-        raw = read_comment_panel(page)
+    signals = read_page_signals(page)
+    read_count += 1
+    if signals.get("risk_control_seen"):
+        state = STATE_RISK_CONTROL
+    elif signals.get("login_wall"):
+        state = STATE_LOGIN_REQUIRED
+
+    open_result: dict[str, Any] = {}
+    if state == STATE_UNKNOWN:
+        open_result = opener(page, settle_ms=settle_ms)
+        opened_by = open_result.get("strategy")
+        if open_result.get("risk_control_seen"):
+            state = STATE_RISK_CONTROL
+        open_signals = open_result.get("signals") or {}
+        if state == STATE_UNKNOWN and open_signals.get("login_wall"):
+            state = STATE_LOGIN_REQUIRED
+
+    if state == STATE_UNKNOWN:
+        observed = read_comment_items(page)
         read_count += 1
-        state = str(raw.get("state") or STATE_UNKNOWN)
-        if state == STATE_RISK_CONTROL:
-            break
-        if state == STATE_LOGIN_REQUIRED:
-            break
-        container_found = container_found or bool(raw.get("container_found"))
-        if raw.get("total_comment_count") is not None:
-            parsed_total = _parse_count_text(raw.get("total_comment_count"))
-            if parsed_total is not None:
-                total_comment_count = parsed_total
-        hint = raw.get("has_more_hint")
-        if hint is not None:
-            has_more_hint = bool(hint)
+        panel_found = bool(observed.get("panel_found"))
+        opened = bool(open_result.get("opened")) or bool(
+            observed.get("reply_anchor_count")
+        )
 
-        raw_items = raw.get("items")
-        if isinstance(raw_items, list):
-            for candidate in raw_items:
-                if not isinstance(candidate, dict):
-                    continue
-                normalized = normalize_comment_item(
-                    candidate, video_id=video_id, collected_at=collected_at
-                )
-                if normalized is None:
-                    dropped += 1
-                    continue
-                key = _item_key(normalized)
-                if key in ordered:
-                    continue
-                ordered[key] = normalized
-                ordered_items.append(normalized)
-
-        if state == STATE_EMPTY:
+        if observed.get("empty_seen") and not observed.get("reply_anchor_count"):
+            state = STATE_EMPTY
             exhausted = True
-            break
-        current_count = len(ordered_items)
-        if current_count >= window_end:
-            # Requested window is satisfied; whether more pages exist is not yet
-            # known, so the caller must treat this as "possibly has more".
+        elif observed.get("reply_anchor_count"):
+            state = STATE_COMMENTS
+        elif opened and panel_found:
+            reason = REASON_PANEL_OPENED_BUT_NO_ITEMS
+        elif opened and not panel_found:
+            reason = REASON_SELECTORS_NOT_MATCHED
+        else:
+            reason = REASON_PANEL_NOT_OPENED
+
+        while state == STATE_COMMENTS:
+            raw_items = observed.get("items")
+            if isinstance(raw_items, list):
+                for candidate in raw_items:
+                    if not isinstance(candidate, dict):
+                        continue
+                    normalized = normalize_comment_item(
+                        candidate, video_id=video_id, collected_at=collected_at
+                    )
+                    if normalized is None:
+                        dropped += 1
+                        continue
+                    key = _item_key(normalized)
+                    if key in ordered:
+                        continue
+                    ordered[key] = normalized
+                    ordered_items.append(normalized)
+            if observed.get("total_comment_count") is not None:
+                parsed_total = _parse_count_text(observed.get("total_comment_count"))
+                if parsed_total is not None:
+                    total_comment_count = parsed_total
+            hint = observed.get("has_more_hint")
+            if hint is not None:
+                has_more_hint = bool(hint)
+
+            current_count = len(ordered_items)
+            if current_count >= window_end:
+                if has_more_hint is False:
+                    exhausted = True
+                break
             if has_more_hint is False:
                 exhausted = True
-            break
-        if has_more_hint is False:
-            exhausted = True
-            break
-        if current_count == previous_count:
-            stable_rounds += 1
-        else:
-            stable_rounds = 0
-        previous_count = current_count
-        if stable_rounds >= 2 or scroll_rounds >= max_scroll_rounds:
-            exhausted = True
-            break
-        page.evaluate(_SCROLL_COMMENT_PANEL_SCRIPT)
-        scroll_rounds += 1
-        wait_for_timeout = getattr(page, "wait_for_timeout", None)
-        if callable(wait_for_timeout) and settle_ms > 0:
-            wait_for_timeout(settle_ms)
+                break
+            if current_count == previous_count:
+                stable_rounds += 1
+            else:
+                stable_rounds = 0
+            previous_count = current_count
+            if stable_rounds >= 2 or scroll_rounds >= max_scroll_rounds:
+                exhausted = True
+                break
 
-    state = state if state in {
-        STATE_COMMENTS,
-        STATE_EMPTY,
-        STATE_RISK_CONTROL,
-        STATE_LOGIN_REQUIRED,
-    } else STATE_UNKNOWN
-    if state == STATE_UNKNOWN and ordered_items:
-        state = STATE_COMMENTS
+            scroll_comment_panel(page)
+            scroll_rounds += 1
+            wait_for_timeout = getattr(page, "wait_for_timeout", None)
+            if callable(wait_for_timeout) and settle_ms > 0:
+                wait_for_timeout(settle_ms)
+            scroll_signals = read_page_signals(page)
+            read_count += 1
+            if scroll_signals.get("risk_control_seen"):
+                state = STATE_RISK_CONTROL
+                reason = None
+                break
+            if scroll_signals.get("login_wall"):
+                state = STATE_LOGIN_REQUIRED
+                reason = None
+                break
+            observed = read_comment_items(page)
+            read_count += 1
+            panel_found = panel_found or bool(observed.get("panel_found"))
 
     buffer_items = ordered_items[:buffer_size]
     window = buffer_items[cursor_offset:window_end]
     return {
         "state": state,
-        "container_found": container_found,
+        "reason": reason,
+        "panel_found": panel_found,
+        "opened_by": opened_by,
         "items": window,
         "raw_item_count": len(window),
         "seen_item_count": len(ordered_items),

@@ -328,6 +328,28 @@ douyin-mcp status
 `douyin_browser_get_video_comments(video_id, limit=50, cursor=None, keyword=None, recent=None)`
 只读取当前可见作品页评论区的 DOM，不调用私有接口、不绕过验证。v1 不落库、不展开二级回复。
 
+流程说明：公开视频页 `/video/<id>` 会 302 到 `/jingxuan?modal_id=<id>`，评论抽屉**默认关闭**，
+DOM 中没有评论节点。采集器会先按语义锚点尝试打开评论入口（右侧带数字的「评论」、`aria-label` 含「评论」、
+正文精确「评论」tab），再用「回复」/「展开 N 条回复」actions 定位评论项并向上取容器；不使用哈希类名或
+`data-e2e` 作为依赖。打不开或打开后没有渲染评论项时返回 `status=parse_failed` +
+`error_code=DOM_MISMATCH`，并用 `reason` 区分：
+
+- `panel_not_opened`：评论入口未命中或面板未打开；
+- `panel_opened_but_no_items`：面板已打开但没有渲染出评论项；
+- `selectors_not_matched`：面板/评论项容器未定位（选择器漂移）。
+
+真机探路（需要本机已登录的 `DOUYIN_BROWSER_PROFILE_DIR`）：
+
+```text
+PYENV_VERSION=3.11.11 .venv/bin/python scripts/probe_comment_dom.py \
+  --source both --video-id recent --recent-limit 2 --headed
+```
+
+`--source public` 走公开视频弹层，`--source creator` 走创作者中心作品管理的「评论」入口；
+`--profile`、`--out`、`--settle`、`--timeout-ms`、`--headless` 可覆盖默认值。脚本一次只处理一条作品，
+遇到验证立即停止并落盘；产物包含整页 HTML、面板 HTML、截图、分步耗时/哈希与结构化 JSON（`signals` 一律
+按实际命中填写）。探路产物可能含真实页面内容，只用于本地排障，不得提交仓库。
+
 ```jsonc
 {
   "status": "completed | partial | aborted_risk_control | user_action_required | parse_failed",
@@ -350,7 +372,8 @@ douyin-mcp status
                "categories": {"求链接": 0, "提问": 0, "负反馈": 0, "正反馈": 0},
                "multi_label": true, "keyword_rule_version": "comment-keywords-v1",
                "top_words": [{"word": "链接", "count": 1}]},
-  "parser_version": "comment-panel-v1",
+  "reason": null,
+  "parser_version": "comment-panel-v2",
   "warnings": []
 }
 ```
@@ -367,7 +390,7 @@ douyin-mcp status
 - 明确空态（「暂无评论」等）即使页面没有数字总数也返回 `sampled=false` / `completeness="complete"`。
 - 昵称保留（评论者公开昵称），并通过 `responses.py` 的字符串脱敏通道处理 header/URL/路径；任何路径都不返回 cookie、header、用户 id、头像 URL 或主页链接。注意：调用方（MCP 客户端/模型服务）会收到评论文本与昵称，请自行确认平台外处理与向第三方提供的合规边界。
 - 分类为关键词多标签（`multi_label=true`），词表可用 `DATA_DIR/comment_keywords.json` 覆盖，返回实际生效的 `keyword_rule_version`。
-- `parser_version=comment-panel-v1` 由 `browser/comments.py` 维护；评论面板 DOM 漂移时用它追踪解析版本。
+- `parser_version=comment-panel-v2` 由 `browser/comments.py` 维护；评论面板 DOM 漂移时用它追踪解析版本。
 
 ### 文案流水线配置
 

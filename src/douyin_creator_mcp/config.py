@@ -32,7 +32,7 @@ class Settings:
     douyin_creator_home_url: str = "https://creator.douyin.com/"
     douyin_creator_video_url: str = "https://creator.douyin.com/creator-micro/content/manage"
     douyin_web_video_url_template: str = "https://www.douyin.com/video/{video_id}"
-    douyin_comment_settle_ms: int = 800
+    douyin_comment_settle_ms: int = 600
     transcript_ingestion_enabled: bool = False
     transcript_pipeline_version: str = "transcript-v1"
     transcript_worker_count: int = 1
@@ -153,7 +153,7 @@ def load_settings(
             "https://www.douyin.com/video/{video_id}",
         ),
         douyin_comment_settle_ms=max(
-            0, _get_int(merged, "DOUYIN_COMMENT_SETTLE_MS", 800)
+            0, _get_int(merged, "DOUYIN_COMMENT_SETTLE_MS", 600)
         ),
         transcript_ingestion_enabled=_get_bool(
             merged, "TRANSCRIPT_INGESTION_ENABLED", False

@@ -62,7 +62,7 @@ def test_normal_result_contract_and_insights(settings: Any) -> None:
     assert result["rate_limited"] is False
     assert result["has_more"] is False
     assert result["next_cursor"] is None
-    assert result["parser_version"] == "comment-panel-v1"
+    assert result["parser_version"] == "comment-panel-v2"
 
     insights = result["insights"]
     assert insights["multi_label"] is True
@@ -111,6 +111,25 @@ def test_dom_mismatch_is_parse_failed_not_completed(settings: Any) -> None:
     assert result["comments"] == []
     assert result["sampled"] is None
     assert result["completeness"] == "unknown"
+    assert "reason" in result
+
+
+@pytest.mark.parametrize(
+    "reason",
+    ["panel_not_opened", "panel_opened_but_no_items", "selectors_not_matched"],
+)
+def test_parse_failure_exposes_distinct_reason(settings: Any, reason: str) -> None:
+    observation = make_observation(
+        [], state="unknown", container_found=False, exhausted=True
+    )
+    observation["reason"] = reason
+    service, _ = build_service(settings, {VIDEO_ID: observation})
+    result = service.get_video_comments(VIDEO_ID)
+
+    assert result["status"] == "parse_failed"
+    assert result["error_code"] == "DOM_MISMATCH"
+    assert result["reason"] == reason
+    assert any(reason in warning for warning in result["warnings"])
 
 
 def test_risk_control_aborts_without_retry(settings: Any) -> None:

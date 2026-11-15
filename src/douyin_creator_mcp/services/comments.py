@@ -52,6 +52,18 @@ PARSE_FAILED_MESSAGE = (
 RATE_LIMITED_MESSAGE = (
     "同一作品每天最多采集 1 次评论（本地频率限制），本次未重新访问评论页。"
 )
+REASON_MESSAGES = {
+    "panel_not_opened": (
+        "未能打开评论面板（评论入口未命中或面板未渲染）。"
+        "可先用 scripts/probe_comment_dom.py 在真实登录态下探路。"
+    ),
+    "panel_opened_but_no_items": (
+        "评论面板已打开，但没有渲染出任何评论项（可能仍在加载或结构已变化）。"
+    ),
+    "selectors_not_matched": (
+        "评论面板容器/评论项未能定位，选择器可能已随页面改版漂移。"
+    ),
+}
 LIMIT_REACHED_WARNING = "达到 limit 截断，结果已抽样；可用 next_cursor 继续翻阅。"
 
 
@@ -282,14 +294,19 @@ class CommentsService:
                 "warnings": warnings,
             }
         if state == STATE_UNKNOWN:
-            warnings.append(
-                f"未匹配到评论项选择器（container_found={bool(observation.get('container_found'))}）。"
-            )
+            reason = observation.get("reason")
+            if reason:
+                warnings.append(f"reason={reason}")
+            else:
+                warnings.append(
+                    f"未匹配到评论项选择器（panel_found={bool(observation.get('panel_found'))}）。"
+                )
             return {
                 **base,
                 "status": STATUS_PARSE_FAILED,
                 "error_code": "DOM_MISMATCH",
-                "message": PARSE_FAILED_MESSAGE,
+                "reason": reason,
+                "message": REASON_MESSAGES.get(reason, PARSE_FAILED_MESSAGE),
                 "comments": [],
                 "total": 0,
                 "total_comment_count": observation.get("total_comment_count"),
@@ -353,6 +370,7 @@ class CommentsService:
                 **base,
                 "status": STATUS_PARSE_FAILED,
                 "error_code": "DOM_MISMATCH",
+                "reason": "selectors_not_matched",
                 "message": PARSE_FAILED_MESSAGE,
                 "comments": [],
                 "total": 0,
@@ -563,6 +581,7 @@ class CommentsService:
             .replace(microsecond=0)
             .isoformat(),
             "rate_limited": False,
+            "reason": None,
             "parser_version": COMMENT_PARSER_VERSION,
         }
 

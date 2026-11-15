@@ -29,8 +29,11 @@ Comment field missing semantics (unchanged from v1):
 * ``author_nickname``: ``""`` when the panel does not render a nickname.
 * ``like_count`` / ``reply_count``: ``None`` when not displayed; never faked 0.
 * ``posted_at``: ``None`` when unparseable; precision ``"unknown"`` then.
-  Relative texts are back-dated from ``fetched_at`` and marked ``"approx"``;
-  full date+time texts are ``"exact"``.
+  Three-tier precision: ``"approx"`` for relative texts (back-dated from
+  ``fetched_at``: ``1小时前·云南`` / ``昨天 12:30`` / ``前天``) and for
+  month-day-only texts whose year is inferred (``11-14``); ``"exact"`` only
+  when the text contains a full year date (``2026-11-14`` /
+  ``2026-11-14 08:00`` / ``2026年11月14日``).
 """
 
 from __future__ import annotations

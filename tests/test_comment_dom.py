@@ -19,6 +19,7 @@ from douyin_creator_mcp.browser.comments import (
     STATE_EMPTY,
     STATE_RISK_CONTROL,
     STATE_UNKNOWN,
+    STATE_VIDEO_NOT_PUBLIC,
     collect_comments,
 )
 
@@ -301,3 +302,18 @@ def test_real_fixture_end_to_end_insights(dom_page: Any, settings: Any) -> None:
     for comment in result["comments"]:
         assert comment["posted_at"] is not None
         assert comment["posted_at_precision"] == "approx"
+
+
+def test_video_not_public_stops_without_opening_panel() -> None:
+    page = FakePanelPage(signals={"video_not_public_seen": True})
+    result = collect_comments(
+        page,
+        video_id=VIDEO_ID,
+        collected_at=COLLECTED_AT,
+        panel_opener=_stub_opener({"opened": False}),
+    )
+
+    assert result["state"] == STATE_VIDEO_NOT_PUBLIC
+    assert result["reason"] == "video_not_public"
+    assert page.evaluate_calls == 1
+    assert page.scroll_calls == 0

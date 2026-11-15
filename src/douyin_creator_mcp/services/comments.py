@@ -21,6 +21,7 @@ from ..browser.comments import (
     MAX_COMMENT_LIMIT,
     STATE_COMMENTS_DISABLED,
     STATE_EMPTY,
+    STATE_VIDEO_NOT_PUBLIC,
     STATE_LOGIN_REQUIRED,
     STATE_RISK_CONTROL,
     STATE_UNKNOWN,
@@ -68,6 +69,10 @@ RATE_LIMITED_MESSAGE = (
 REASON_MESSAGES = {
     "comments_disabled": (
         "该作品评论区已关闭（作者关闭了评论），没有可采集的评论。"
+    ),
+    "video_not_public": (
+        "该作品的公开页不存在（已删除、仅自己可见或未公开），"
+        "公开数据源不适用；创作者侧评论请在创作者后台查看。"
     ),
     "panel_not_opened": (
         "未能打开评论面板（评论入口未命中或面板未渲染）。"
@@ -326,6 +331,24 @@ class CommentsService:
                 "insights": build_insights(comments, rules, rule_version),
                 "warnings": warnings,
             }
+        if state == STATE_VIDEO_NOT_PUBLIC:
+            return {
+                **base,
+                "status": "skipped",
+                "error_code": "VIDEO_NOT_PUBLIC",
+                "reason": "video_not_public",
+                "retryable": False,
+                "message": REASON_MESSAGES["video_not_public"],
+                "comments": [],
+                "total": 0,
+                "total_comment_count": None,
+                "sampled": None,
+                "completeness": "unknown",
+                "has_more": False,
+                "next_cursor": None,
+                "insights": build_insights([], rules, rule_version),
+                "warnings": [],
+            }
         if state == STATE_COMMENTS_DISABLED:
             return {
                 **base,
@@ -525,6 +548,7 @@ class CommentsService:
         login_required = False
         parse_failed = False
         failed_any = False
+        skipped_any = False
         for video_id in videos:
             if remaining <= 0:
                 break
@@ -574,6 +598,8 @@ class CommentsService:
                 parse_failed = True
             elif single["status"] == STATUS_PARTIAL:
                 failed_any = True
+            elif single["status"] == "skipped":
+                skipped_any = True
             for comment in single.get("comments") or []:
                 merged.append({**comment, "video_id": video_id})
             remaining -= int(single["total"])
@@ -592,6 +618,10 @@ class CommentsService:
             status = STATUS_USER_ACTION_REQUIRED
             error_code = "LOGIN_REQUIRED"
             message = LOGIN_MESSAGE
+        elif skipped_any and not merged and len(limited_ids) + 1 >= len(videos):
+            status = "skipped"
+            error_code = "VIDEO_NOT_PUBLIC"
+            message = REASON_MESSAGES["video_not_public"]
         elif parse_failed and not merged:
             status = STATUS_PARSE_FAILED
             error_code = "DOM_MISMATCH"

@@ -642,3 +642,51 @@ def test_risk_control_does_not_trigger_navigation_retry(settings: Any) -> None:
 
     assert result["status"] == "aborted_risk_control"
     assert len(executor.commands) == 1
+
+
+def test_video_not_public_returns_skipped_without_quota(settings: Any) -> None:
+    service, executor = build_service(
+        settings,
+        {
+            VIDEO_ID: make_observation(
+                [],
+                state="video_not_public",
+                panel_found=False,
+                total_comment_count=None,
+            )
+        },
+    )
+
+    first = service.get_video_comments(VIDEO_ID)
+    second = service.get_video_comments(VIDEO_ID)
+
+    for result in (first, second):
+        assert result["status"] == "skipped"
+        assert result["reason"] == "video_not_public"
+        assert result["error_code"] == "VIDEO_NOT_PUBLIC"
+        assert result["retryable"] is False
+        assert result["comments"] == []
+        assert result["sampled"] is None
+        assert result["completeness"] == "unknown"
+        assert result["rate_limited"] is False
+    # The daily guard must not be written: this is "source not applicable".
+    assert not (settings.data_dir / "comment_collection_guard.json").exists()
+    # A second call is not rate-limited; it re-reads and gets skipped again.
+    assert len(executor.commands) == 2
+
+
+def test_video_not_public_is_not_navigation_race_or_parse_failed(settings: Any) -> None:
+    service, _ = build_service(
+        settings,
+        {
+            VIDEO_ID: make_observation(
+                [], state="video_not_public", panel_found=False
+            )
+        },
+    )
+    result = service.get_video_comments(VIDEO_ID)
+
+    assert result["status"] != "parse_failed"
+    assert result["status"] != "completed"
+    assert result["error_code"] != "NAVIGATION_RACE"
+    assert result["error_code"] != "DOM_MISMATCH"

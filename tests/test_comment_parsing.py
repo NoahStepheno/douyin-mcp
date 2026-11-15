@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from douyin_creator_mcp.browser.comments import (
+    is_not_public_url,
     parse_comment_time,
     parse_total_comment_count,
 )
@@ -136,3 +137,17 @@ def test_matched_terms_are_consistent_with_counts() -> None:
         DEFAULT_COMMENT_KEYWORDS["求链接"]
     )
     assert normalize_for_match("求 发 一下！") == "求发一下"
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://www.douyin.com/jingxuan?previous_page=web_video_404_link", True),
+        ("https://www.douyin.com/video/404", True),
+        ("https://www.douyin.com/jingxuan?modal_id=7707861402739952923", False),
+        ("https://www.douyin.com/video/7707861402739952923", False),
+        ("", False),
+    ],
+)
+def test_is_not_public_url(url: str, expected: bool) -> None:
+    assert is_not_public_url(url) is expected

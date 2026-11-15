@@ -66,12 +66,48 @@ STATE_EMPTY = "empty"
 STATE_RISK_CONTROL = "risk_control"
 STATE_LOGIN_REQUIRED = "login_required"
 STATE_COMMENTS_DISABLED = "comments_disabled"
+STATE_VIDEO_NOT_PUBLIC = "video_not_public"
 STATE_UNKNOWN = "unknown"
 
 REASON_COMMENTS_DISABLED = "comments_disabled"
+REASON_VIDEO_NOT_PUBLIC = "video_not_public"
 REASON_PANEL_NOT_OPENED = "panel_not_opened"
 REASON_PANEL_OPENED_BUT_NO_ITEMS = "panel_opened_but_no_items"
 REASON_SELECTORS_NOT_MATCHED = "selectors_not_matched"
+
+
+_NOT_PUBLIC_URL_RE = re.compile(
+    r"(web_video_404_link|video_404|/video/404)", re.IGNORECASE
+)
+
+
+def is_not_public_url(url: Any) -> bool:
+    """True when Douyin redirected the public video URL to its 404 layer."""
+
+    return bool(_NOT_PUBLIC_URL_RE.search(str(url or "")))
+
+
+def video_not_public_observation(video_id: str = "") -> dict[str, Any]:
+    """Observation for a video whose public page does not exist.
+
+    No panel read happens and the caller must not retry or record the daily
+    guard: this is a "source not applicable" result, not a failure.
+    """
+
+    return {
+        "state": STATE_VIDEO_NOT_PUBLIC,
+        "reason": REASON_VIDEO_NOT_PUBLIC,
+        "panel_found": False,
+        "opened_by": None,
+        "items": [],
+        "raw_item_count": 0,
+        "seen_item_count": 0,
+        "dropped_item_count": 0,
+        "total_comment_count": None,
+        "exhausted": True,
+        "read_count": 0,
+        "parser_version": COMMENT_PARSER_VERSION,
+    }
 
 
 def _parse_count_text(value: Any) -> int | None:
@@ -364,6 +400,8 @@ def collect_comments(
         state = STATE_RISK_CONTROL
     elif signals.get("login_wall"):
         state = STATE_LOGIN_REQUIRED
+    elif signals.get("video_not_public_seen"):
+        state = STATE_VIDEO_NOT_PUBLIC
     elif signals.get("comments_disabled_seen"):
         state = STATE_COMMENTS_DISABLED
 
@@ -378,6 +416,8 @@ def collect_comments(
         open_signals = open_result.get("signals") or {}
         if state == STATE_UNKNOWN and open_signals.get("login_wall"):
             state = STATE_LOGIN_REQUIRED
+        if state == STATE_UNKNOWN and open_signals.get("video_not_public_seen"):
+            state = STATE_VIDEO_NOT_PUBLIC
         if state == STATE_UNKNOWN and open_signals.get("comments_disabled_seen"):
             state = STATE_COMMENTS_DISABLED
 
@@ -465,6 +505,9 @@ def collect_comments(
             observed = read_comment_items(page)
             read_count += 1
             panel_found = panel_found or bool(observed.get("panel_found"))
+
+    if state == STATE_VIDEO_NOT_PUBLIC:
+        reason = REASON_VIDEO_NOT_PUBLIC
 
     buffer_items = ordered_items[:buffer_size]
     window = buffer_items[cursor_offset:window_end]

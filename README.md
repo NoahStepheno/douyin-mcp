@@ -334,6 +334,9 @@ DOM 中没有评论节点。采集器会先按语义锚点尝试打开评论入�
 `data-e2e` 作为依赖。打不开或打开后没有渲染评论项时返回 `status=parse_failed` +
 `error_code=DOM_MISMATCH`，并用 `reason` 区分：
 
+- `video_not_public`：公开页 404（`previous_page=web_video_404_link`）/作品已删除/仅自己可见时返回
+  `status=skipped` + `error_code=VIDEO_NOT_PUBLIC` + `retryable=false`；这是「数据源不适用」，
+  **不消耗每日 1 次配额**，也不计入失败率、告警或覆盖率缺口（创作者侧评论请到创作者后台查看）；
 - `comments_disabled`：页面明确提示「评论已关闭 / 作者已关闭评论」，返回 `error_code=COMMENTS_DISABLED`，
   不按 `completed` + 0 条处理；
 - `panel_not_opened`：评论入口未命中或面板未打开；

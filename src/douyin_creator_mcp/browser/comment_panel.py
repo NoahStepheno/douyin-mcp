@@ -104,6 +104,8 @@ _SIGNALS_SCRIPT = (
   const loginText = /(扫码登录|登录后查看|请先登录|手机号登录|验证码登录|登录后参与评论)/;
   const emptyText = /(暂无评论|还没有评论|来抢首评|暂时没有评论|还没有人评论)/;
   const disabledText = /(评论已关闭|作者已关闭评论|评论功能已关闭|已关闭评论|该作品评论已关闭)/;
+  const notPublicUrl = /(web_video_404_link|video_404|\/video\/404)/;
+  const notPublicText = /(作品不存在|视频不存在|内容不存在|作品已删除|视频已删除|该作品不可见)/;
   const riskSelectors = [
     '#captcha_container', '[id*="captcha"]', '[class*="captcha"]',
     '[data-e2e*="captcha"]', '[class*="verify-wrap"]', '[class*="verifyModal"]'
@@ -119,6 +121,7 @@ _SIGNALS_SCRIPT = (
     login_wall: loginText.test(bodyText),
     empty_seen: emptyText.test(bodyText),
     comments_disabled_seen: disabledText.test(bodyText),
+    video_not_public_seen: notPublicUrl.test(location.href) || notPublicText.test(bodyText),
     reply_button_seen: anchors.length > 0,
     reply_anchor_count: anchors.length,
     header_seen: /条评论|全部评论/.test(bodyText.slice(0, 8000)),

@@ -16,7 +16,11 @@ from typing import Any, Protocol
 from urllib.parse import parse_qs, urlsplit
 from zoneinfo import ZoneInfo
 
-from ..browser.comments import collect_comments
+from ..browser.comments import (
+    collect_comments,
+    is_not_public_url,
+    video_not_public_observation,
+)
 from ..browser.extractors import (
     collect_all_video_cards,
     extract_detail_metrics,
@@ -139,20 +143,36 @@ class DefaultBrowserBackend:
             return {"details": details}
         if isinstance(command, CollectComments):
             session = self._ensure_session(headless=command.headless)
-            page = session.open_video_comments(command.video_id)
-            collected_at = (
-                datetime.fromisoformat(command.collected_at)
-                if command.collected_at
-                else None
-            )
-            return collect_comments(
-                page,
-                video_id=command.video_id,
-                limit=command.limit,
-                cursor_offset=command.cursor_offset,
-                collected_at=collected_at,
-                settle_ms=max(0, self.settings.douyin_comment_settle_ms),
-            )
+            page = None
+            try:
+                page = session.open_video_comments(command.video_id)
+                collected_at = (
+                    datetime.fromisoformat(command.collected_at)
+                    if command.collected_at
+                    else None
+                )
+                return collect_comments(
+                    page,
+                    video_id=command.video_id,
+                    limit=command.limit,
+                    cursor_offset=command.cursor_offset,
+                    collected_at=collected_at,
+                    settle_ms=max(0, self.settings.douyin_comment_settle_ms),
+                )
+            except Exception:
+                # A 404 redirect can surface as a navigation/context error; the
+                # final URL is the authoritative signal. Do not retry or record
+                # quota for a page that does not exist.
+                current_url = ""
+                if page is not None:
+                    current_url = str(getattr(page, "url", "") or "")
+                if not current_url:
+                    pages = list(getattr(session.context, "pages", None) or [])
+                    if pages:
+                        current_url = str(getattr(pages[-1], "url", "") or "")
+                if is_not_public_url(current_url):
+                    return video_not_public_observation(command.video_id)
+                raise
         if isinstance(command, VerifyAccount):
             session = self._ensure_session()
             page = session.open_creator_video_page()

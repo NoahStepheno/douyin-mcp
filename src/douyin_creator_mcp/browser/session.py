@@ -95,6 +95,13 @@ class BrowserSession:
     def open_video_detail(self, url: str) -> Any:
         return self.open_page(url)
 
+    def open_video_comments(self, video_id: str) -> Any:
+        """Open the public video page whose comment panel is read next."""
+        url = self.settings.douyin_web_video_url_template.format(
+            video_id=video_id
+        )
+        return self.open_page(url)
+
     def open_video_detail_from_list(self, title: str, publish_time: int) -> Any:
         """Open one uniquely matched card without touching its edit operations."""
         expected_title = str(title).strip()

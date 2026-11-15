@@ -31,6 +31,10 @@ class Settings:
     douyin_detail_parser_version: str = "creator-detail-v2"
     douyin_creator_home_url: str = "https://creator.douyin.com/"
     douyin_creator_video_url: str = "https://creator.douyin.com/creator-micro/content/manage"
+    douyin_web_video_url_template: str = "https://www.douyin.com/video/{video_id}"
+    douyin_comment_settle_ms: int = 600
+    douyin_comment_nav_retry_min_seconds: float = 2.0
+    douyin_comment_nav_retry_max_seconds: float = 3.0
     transcript_ingestion_enabled: bool = False
     transcript_pipeline_version: str = "transcript-v1"
     transcript_worker_count: int = 1
@@ -80,6 +84,16 @@ def _get(env: Mapping[str, str], key: str, default: str = "") -> str:
 def _get_int(env: Mapping[str, str], key: str, default: int) -> int:
     raw = _get(env, key)
     return int(raw) if raw else default
+
+
+def _get_float(env: Mapping[str, str], key: str, default: float) -> float:
+    raw = _get(env, key)
+    try:
+        return float(raw) if raw else default
+    except ValueError:
+        raise AppError(
+            CONFIGURATION_ERROR, f"{key} must be a number."
+        ) from None
 
 
 def _get_optional(env: Mapping[str, str], key: str) -> str | None:
@@ -144,6 +158,30 @@ def load_settings(
             merged,
             "DOUYIN_CREATOR_VIDEO_URL",
             "https://creator.douyin.com/creator-micro/content/manage",
+        ),
+        douyin_web_video_url_template=_get(
+            merged,
+            "DOUYIN_WEB_VIDEO_URL_TEMPLATE",
+            "https://www.douyin.com/video/{video_id}",
+        ),
+        douyin_comment_settle_ms=max(
+            0, _get_int(merged, "DOUYIN_COMMENT_SETTLE_MS", 600)
+        ),
+        douyin_comment_nav_retry_min_seconds=max(
+            0.0,
+            _get_float(
+                merged,
+                "DOUYIN_COMMENT_NAV_RETRY_MIN_SECONDS",
+                2.0,
+            ),
+        ),
+        douyin_comment_nav_retry_max_seconds=max(
+            0.0,
+            _get_float(
+                merged,
+                "DOUYIN_COMMENT_NAV_RETRY_MAX_SECONDS",
+                3.0,
+            ),
         ),
         transcript_ingestion_enabled=_get_bool(
             merged, "TRANSCRIPT_INGESTION_ENABLED", False

@@ -13,6 +13,7 @@ from .content.asr import AudioExtractor, ControlledProcessRunner, FasterWhisperT
 from .content.media import FFprobe, SecureMediaDownloader
 from .instance_lock import InstanceLock
 from .services.browser_service import BrowserService
+from .services.comments import CommentsService
 from .services.transcript_coordinator import DefaultPipelineAdapter, TranscriptCoordinator
 from .services.transcript_policy import TranscriptIngestionPolicy
 from .services.transcript_query import CursorSigner, TranscriptQueryService
@@ -25,6 +26,7 @@ class ServiceContainer:
     settings: Settings
     db: Database
     browser_service: BrowserService
+    comments_service: CommentsService
     browser_executor: BrowserExecutor
     transcript_repository: TranscriptRepository
     transcript_query: TranscriptQueryService
@@ -129,6 +131,9 @@ class Runtime:
                 settings=self.settings,
                 db=db,
                 browser_service=BrowserService(
+                    self.settings, db, browser_executor=browser_executor
+                ),
+                comments_service=CommentsService(
                     self.settings, db, browser_executor=browser_executor
                 ),
                 browser_executor=browser_executor,

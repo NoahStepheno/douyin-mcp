@@ -302,6 +302,7 @@ douyin-mcp status
 | `douyin_browser_sync_creator_data` | 同步作品列表和列表指标 |
 | `douyin_browser_sync_video_details` | 分批同步指定或近期作品详情指标 |
 | `douyin_browser_list_videos` | 分页查询作品和最新指标 |
+| `douyin_browser_get_video_comments` | 采集指定/近期作品可见评论与商单意向 insights（v1，不落库） |
 | `douyin_browser_get_video_performance` | 查询单作品快照和派生指标 |
 | `douyin_browser_compare_videos` | 对比 2～20 条作品 |
 | `douyin_browser_get_metric_coverage` | 查询字段覆盖率和缺失原因 |
@@ -321,6 +322,86 @@ douyin-mcp status
 </details>
 
 所有工具使用内部账号键 `browser-default`，Agent 无需传递账号 ID。常见业务状态包括 `completed`、`partial`、`cache_hit` 和 `user_action_required`。
+
+### 视频评论采集（v1）
+
+`douyin_browser_get_video_comments(video_id, limit=50, cursor=None, keyword=None, recent=None)`
+只读取当前可见作品页评论区的 DOM，不调用私有接口、不绕过验证。v1 不落库、不展开二级回复。
+
+流程说明：公开视频页 `/video/<id>` 会 302 到 `/jingxuan?modal_id=<id>`，评论抽屉**默认关闭**，
+DOM 中没有评论节点。采集器会先按语义锚点尝试打开评论入口（右侧带数字的「评论」、`aria-label` 含「评论」、
+正文精确「评论」tab），再用「回复」/「展开 N 条回复」actions 定位评论项并向上取容器；不使用哈希类名或
+`data-e2e` 作为依赖。打不开或打开后没有渲染评论项时返回 `status=parse_failed` +
+`error_code=DOM_MISMATCH`，并用 `reason` 区分：
+
+- `comments_disabled`：页面明确提示「评论已关闭 / 作者已关闭评论」，返回 `error_code=COMMENTS_DISABLED`，
+  不按 `completed` + 0 条处理；
+- `panel_not_opened`：评论入口未命中或面板未打开；
+- `panel_opened_but_no_items`：面板已打开但没有渲染出评论项；
+- `selectors_not_matched`：面板/评论项容器未定位（选择器漂移）。
+
+真机探路（需要本机已登录的 `DOUYIN_BROWSER_PROFILE_DIR`）：
+
+```text
+PYENV_VERSION=3.11.11 .venv/bin/python scripts/probe_comment_dom.py \
+  --source both --video-id recent --recent-limit 2 --headed
+```
+
+`--source public` 走公开视频弹层，`--source creator` 走创作者中心作品管理的「评论」入口；
+`--profile`、`--out`、`--settle`、`--timeout-ms`、`--headless` 可覆盖默认值。脚本一次只处理一条作品，
+遇到验证立即停止并落盘；产物包含整页 HTML、面板 HTML、截图、分步耗时/哈希与结构化 JSON（`signals` 一律
+按实际命中填写）。探路产物可能含真实页面内容，只用于本地排障，不得提交仓库。
+
+```jsonc
+{
+  "status": "completed | partial | aborted_risk_control | user_action_required | parse_failed",
+  "error_code": null,
+  "video_id": "...",
+  "fetched_at": "2026-11-15T12:00:00+08:00",
+  "comments": [{"comment_id": "...", "content": "...", "author_nickname": "...",
+                "like_count": 3, "reply_count": 0,
+                "posted_at": "2026-11-15T09:00:00+08:00",
+                "posted_at_precision": "exact | approx | unknown",
+                "is_pinned": false, "is_author_reply": false}],
+  "total": 1,
+  "total_comment_count": 12,
+  "sampled": true,
+  "completeness": "truncated",
+  "rate_limited": false,
+  "has_more": true,
+  "next_cursor": "offset:50",
+  "insights": {"total_comments": 1, "excluded_author_replies": 0,
+               "categories": {"求链接": 0, "提问": 0, "负反馈": 0, "正反馈": 0},
+               "multi_label": true, "keyword_rule_version": "comment-keywords-v2",
+               "category_details": {"求链接": {"count": 0, "matched_terms": []}},
+               "top_words": [{"word": "链接", "count": 1}]},
+  "reason": null,
+  "parser_version": "comment-panel-v2",
+  "warnings": []
+}
+```
+
+字段语义与缺失值：
+
+- `total_comment_count`：平台显示的总评论数；页面没有明确数字时为 `null`，不估算。
+- `sampled` / `completeness`：三态。总数已知且返回数少于总数、或被 `limit` 截断 → `true` / `"truncated"`；总数已知且相等、或明确空态 → `false` / `"complete"`；总数不可得且未截断 → `null` / `"unknown"`（完整性未知，绝不能读成“全量”）。
+- `rate_limited`：本地 guard（`DATA_DIR/comment_collection_guard.json`，按 video_id + 日期）显示当天已采集时为 `true`；此时仍返回 `status=completed` 的正常结构，不抛错、不再访问评论页。
+- `parse_failed` + `error_code=DOM_MISMATCH`：评论区结构未识别，**不等于 0 条评论**；只有页面明确出现「暂无评论」等空态文案才返回 `completed` + `comments=[]`。
+- `aborted_risk_control` + `error_code=RISK_CONTROL`：出现验证/风控立即停止，不自动重试。
+- `posted_at_precision`：相对时间按 `fetched_at` 倒推并标 `approx`；完整日期时间标 `exact`；无法解析时 `posted_at=null` + `unknown`。
+- `video_id="recent"` 时 `total_comment_count` 为 `null`（跨作品求和非平台展示值），每个评论项额外带 `video_id`，并用 `videos` 列出逐作品状态。
+- 明确空态（「暂无评论」等）即使页面没有数字总数也返回 `sampled=false` / `completeness="complete"`。
+- 昵称保留（评论者公开昵称），并通过 `responses.py` 的字符串脱敏通道处理 header/URL/路径；任何路径都不返回 cookie、header、用户 id、头像 URL 或主页链接。注意：调用方（MCP 客户端/模型服务）会收到评论文本与昵称，请自行确认平台外处理与向第三方提供的合规边界。
+- 分类为关键词多标签（`multi_label=true`），词表可用 `DATA_DIR/comment_keywords.json` 覆盖，返回实际生效的 `keyword_rule_version`。
+  v2（`comment-keywords-v2`）会先去掉空格与标点再匹配，并新增 `求发/原文/在哪/怎么弄/多少钱/教程/求` 等变体；
+  **v1 与 v2 的分类计数不可直接比较**（历史数据请按版本号分段统计）。`categories` 保持原有计数语义，
+  另返回 `category_details[分类] = {"count": N, "matched_terms": [...]}` 供离线核对一致率。
+- `total_comment_count` 只从面板头部解析（`共 N 条评论` / `全部评论(N)` / `N 条评论`），解析不到保持 `null`；
+  **绝不用解析到的条目数冒充总数**。页面/头部声明总数 N>0 但解析到 0 条时返回 `parse_failed` + `DOM_MISMATCH`。
+- 导航竞态（`Execution context was destroyed` 等）会**限速重试 1 次**，随机间隔由
+  `DOUYIN_COMMENT_NAV_RETRY_MIN_SECONDS` / `DOUYIN_COMMENT_NAV_RETRY_MAX_SECONDS` 控制（默认 2–3 秒）；
+  二次失败仍返回 `retryable=true`，风控/验证类错误绝不重试。
+- `parser_version=comment-panel-v2` 由 `browser/comments.py` 维护；评论面板 DOM 漂移时用它追踪解析版本。
 
 ### 文案流水线配置
 

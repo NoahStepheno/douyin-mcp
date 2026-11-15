@@ -426,7 +426,7 @@ PYENV_VERSION=3.11.11 .venv/bin/python scripts/probe_comment_dom.py \
 | `account_play_delta` | 播放量项的「较前N日+N」 | 30d 无对照文案 → `not_displayed` |
 | `profile_visit_count_period` | 「账号总览」→ 主页访问量（区间量，不是累计） | `not_displayed` |
 | `profile_visit_delta` | 主页访问量项的「较前N日+N」 | `not_displayed` |
-| `like_count` / `share_count` / `comment_count` | 作品点赞 / 作品分享 / 作品评论 | `not_displayed` |
+| `work_like_count_period` / `work_share_count_period` / `work_comment_count_period` | 作品点赞 / 作品分享 / 作品评论（作品维度·区间量） | `not_displayed` |
 | `net_follower_gain` | 净增粉丝（账号级，不摊到单条作品） | `not_displayed` |
 | `like_total` | 文本锚点「获赞」+ 同级数字节点 | 锚点/数字缺失 → `not_displayed` |
 | `follower_indicator` | `#guide_home_fans` 的标签 + 数字 | 缺数字 → `not_displayed` |
@@ -435,6 +435,15 @@ PYENV_VERSION=3.11.11 .venv/bin/python scripts/probe_comment_dom.py \
   解析严格限定在「账号总览」面板内，950 不会进入任何账号级字段。
 - `period_start` / `period_end` 从「统计周期：YYYY.MM.DD-YYYY.MM.DD」解析；
   **7d 模式下该文本可能不存在**，此时为 `null` 并给 warning，不硬失败。
+口径对照（避免把区间量与累计量混读）：
+
+| 字段 | 维度 | 语义 |
+|---|---|---|
+| `account_play_count` / `profile_visit_count_period` / `work_*_period` / `net_follower_gain` | 账号或作品维度 | **区间量**（当前 period 内） |
+| `like_total` | 账号维度 | 历史累计获赞（文本锚点「获赞」） |
+| `follower_indicator` | 账号维度 | 平台标签 + 数值；标签实测「粉丝指数」，语义未确认 |
+| `account_play_delta` / `profile_visit_delta` | 账号维度 | 与「较前N日」对照的区间差；30d 无对照文案时为 `null` + `not_displayed`（不是 0） |
+
 - `follower_indicator` 只返回平台标签（实测「粉丝指数」）与数值，**语义未确认，不可当作粉丝数量**；
   标签变化时返回实际标签文本，不硬编码；返回体不提供该口径的独立字段。
 - 每日限频：key = `账号 + period + 本地日期`（`DATA_DIR/account_overview_guard.json`）；

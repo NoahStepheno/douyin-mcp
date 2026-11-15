@@ -97,9 +97,9 @@ def test_normal_7d_parse(dom_page: Any, settings: Any) -> None:
     assert result["account_play_delta"] == {"value": 897, "missing_reason": None}
     assert result["profile_visit_count_period"] == {"value": 24, "missing_reason": None}
     assert result["profile_visit_delta"] == {"value": 24, "missing_reason": None}
-    assert result["like_count"]["value"] == 34
-    assert result["share_count"]["value"] == 1
-    assert result["comment_count"]["value"] == 3
+    assert result["work_like_count_period"]["value"] == 34
+    assert result["work_share_count_period"]["value"] == 1
+    assert result["work_comment_count_period"]["value"] == 3
     assert result["net_follower_gain"]["value"] == 1
     assert result["like_total"] == {"value": 185, "missing_reason": None}
     assert result["follower_indicator"] == {
@@ -166,7 +166,7 @@ def test_missing_fields_get_individual_reasons(dom_page: Any, settings: Any) -> 
     assert result["like_total"] == {"value": None, "missing_reason": "not_displayed"}
     # Other fields remain parsed.
     assert result["account_play_count"]["value"] == 901
-    assert result["like_count"]["value"] == 34
+    assert result["work_like_count_period"]["value"] == 34
 
 
 def test_lazy_render_not_ready_is_parse_failed(dom_page: Any, settings: Any) -> None:
@@ -309,3 +309,25 @@ def test_invalid_period_rejected(settings: Any) -> None:
     service, _ = _service(settings, {})
     with pytest.raises(AppError):
         service.get_account_overview("all")
+
+
+def test_30d_deltas_are_null_not_zero(dom_page: Any, settings: Any) -> None:
+    raw = _render(dom_page, REAL_30D)
+    service, _ = _service(settings, _observation(raw))
+    result = service.get_account_overview("30d")
+
+    for field in ("account_play_delta", "profile_visit_delta"):
+        assert result[field]["value"] is None
+        assert result[field]["value"] is not 0
+        assert result[field]["missing_reason"] == "not_displayed"
+
+
+def test_period_field_names_are_explicit(dom_page: Any, settings: Any) -> None:
+    raw = _render(dom_page, REAL_7D)
+    service, _ = _service(settings, _observation(raw))
+    result = service.get_account_overview("7d")
+
+    for field in ("work_like_count_period", "work_share_count_period", "work_comment_count_period"):
+        assert field in result
+    for old in ("like_count", "share_count", "comment_count"):
+        assert old not in result

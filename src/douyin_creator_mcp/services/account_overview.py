@@ -51,9 +51,9 @@ PERIOD_NOT_SWITCHABLE_MESSAGE = (
 METRIC_FIELDS = (
     ("account_play_count", "account_play_count"),
     ("profile_visit_count_period", "profile_visit_count_period"),
-    ("like_count", "like_count"),
-    ("share_count", "share_count"),
-    ("comment_count", "comment_count"),
+    ("work_like_count_period", "work_like_count_period"),
+    ("work_share_count_period", "work_share_count_period"),
+    ("work_comment_count_period", "work_comment_count_period"),
     ("net_follower_gain", "net_follower_gain"),
 )
 

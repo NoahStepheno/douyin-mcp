@@ -131,9 +131,9 @@ _READ_SCRIPT = (
   const metrics = panel ? {
     account_play_count: metricValue(panel, '播放量'),
     profile_visit_count_period: metricValue(panel, '主页访问量'),
-    like_count: metricValue(panel, '作品点赞'),
-    share_count: metricValue(panel, '作品分享'),
-    comment_count: metricValue(panel, '作品评论'),
+    work_like_count_period: metricValue(panel, '作品点赞'),
+    work_share_count_period: metricValue(panel, '作品分享'),
+    work_comment_count_period: metricValue(panel, '作品评论'),
     net_follower_gain: metricValue(panel, '净增粉丝')
   } : {};
   let likeTotal = null;

@@ -196,7 +196,8 @@ def register_browser_tools(mcp: Any, services: Any | None = None) -> None:
 
         返回：status / period / period_start / period_end / captured_at /
         account_play_count / account_play_delta / profile_visit_count_period /
-        profile_visit_delta / like_count / share_count / comment_count /
+        profile_visit_delta / work_like_count_period / work_share_count_period /
+        work_comment_count_period /
         net_follower_gain / like_total / follower_indicator /
         parser_version / warnings。
 

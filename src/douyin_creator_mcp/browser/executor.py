@@ -16,6 +16,13 @@ from typing import Any, Protocol
 from urllib.parse import parse_qs, urlsplit
 from zoneinfo import ZoneInfo
 
+from ..browser.account_overview import (
+    PERIOD_LABELS,
+    decide_state,
+    read_account_overview,
+    select_period,
+    wait_for_account_overview,
+)
 from ..browser.comments import (
     collect_comments,
     is_not_public_url,
@@ -37,6 +44,7 @@ from .media_observer import BundleWindows, MediaBundleCollector
 from .commands import (
     BrowserCommand,
     CloseSession,
+    CollectAccountOverview,
     CollectComments,
     LoginStart,
     LoginStatus,
@@ -173,6 +181,39 @@ class DefaultBrowserBackend:
                 if is_not_public_url(current_url):
                     return video_not_public_observation(command.video_id)
                 raise
+        if isinstance(command, CollectAccountOverview):
+            session = self._ensure_session()
+            page = session.open_page(self.settings.douyin_account_overview_url)
+            observed = wait_for_account_overview(
+                page,
+                settle_ms=command.settle_ms,
+                timeout_ms=command.timeout_ms,
+            )
+            period_switch: dict[str, Any] | None = None
+            state = decide_state(observed)
+            if state == "rendered":
+                requested_label = PERIOD_LABELS.get(command.period)
+                if (
+                    requested_label
+                    and str(observed.get("current_period_label") or "")
+                    != requested_label
+                ):
+                    period_switch = select_period(page, command.period)
+                    observed = read_account_overview(page)
+                    state = decide_state(observed)
+            return {
+                "state": state,
+                "final_url": str(getattr(page, "url", "") or ""),
+                "actual_period_label": observed.get("current_period_label"),
+                "period_start": observed.get("period_start"),
+                "period_end": observed.get("period_end"),
+                "metrics": observed.get("metrics") or {},
+                "like_total": observed.get("like_total"),
+                "follower_indicator": observed.get("follower_indicator"),
+                "period_switch": period_switch,
+                "waited_ms": observed.get("waited_ms"),
+                "parser_version": "account-overview-v1",
+            }
         if isinstance(command, VerifyAccount):
             session = self._ensure_session()
             page = session.open_creator_video_page()

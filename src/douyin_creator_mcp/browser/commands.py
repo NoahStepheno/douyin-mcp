@@ -59,6 +59,17 @@ class CollectComments(BrowserCommand):
 
 
 @dataclass(frozen=True, slots=True)
+class CollectAccountOverview(BrowserCommand):
+    """Open creator-micro/home and read the account overview panel."""
+
+    period: str = "7d"
+    settle_ms: int = 12000
+    timeout_ms: int = 20000
+    collected_at: str = ""
+    priority: int = PRIORITY_METADATA
+
+
+@dataclass(frozen=True, slots=True)
 class VerifyAccount(BrowserCommand):
     account_id: str = ""
     target_video_id: str | None = None

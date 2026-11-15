@@ -2,7 +2,17 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
+# Keep the historical broad ignore, but allow only test source files to be
+# committed. Fixtures must live inside .py modules; other tests/ artifacts stay
+# ignored on purpose.
 tests/
+!tests/
+tests/*
+!tests/**/
+!tests/**/*.py
+
+# Local scratch/continuity workspace (never committed)
+.botharness/
 .mypy_cache/
 .ruff_cache/
 .venv/

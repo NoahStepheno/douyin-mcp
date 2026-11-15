@@ -47,6 +47,18 @@ class SyncVideoDetails(BrowserCommand):
 
 
 @dataclass(frozen=True, slots=True)
+class CollectComments(BrowserCommand):
+    """Read the visible comment panel of one video page."""
+
+    video_id: str = ""
+    limit: int = 50
+    cursor_offset: int = 0
+    collected_at: str = ""
+    headless: bool | None = None
+    priority: int = PRIORITY_METADATA
+
+
+@dataclass(frozen=True, slots=True)
 class VerifyAccount(BrowserCommand):
     account_id: str = ""
     target_video_id: str | None = None

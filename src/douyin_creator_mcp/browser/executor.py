@@ -16,6 +16,7 @@ from typing import Any, Protocol
 from urllib.parse import parse_qs, urlsplit
 from zoneinfo import ZoneInfo
 
+from ..browser.comments import collect_comments
 from ..browser.extractors import (
     collect_all_video_cards,
     extract_detail_metrics,
@@ -32,6 +33,7 @@ from .media_observer import BundleWindows, MediaBundleCollector
 from .commands import (
     BrowserCommand,
     CloseSession,
+    CollectComments,
     LoginStart,
     LoginStatus,
     ObserveMediaBundle,
@@ -135,6 +137,22 @@ class DefaultBrowserBackend:
                     }
                 )
             return {"details": details}
+        if isinstance(command, CollectComments):
+            session = self._ensure_session(headless=command.headless)
+            page = session.open_video_comments(command.video_id)
+            collected_at = (
+                datetime.fromisoformat(command.collected_at)
+                if command.collected_at
+                else None
+            )
+            return collect_comments(
+                page,
+                video_id=command.video_id,
+                limit=command.limit,
+                cursor_offset=command.cursor_offset,
+                collected_at=collected_at,
+                settle_ms=max(0, self.settings.douyin_comment_settle_ms),
+            )
         if isinstance(command, VerifyAccount):
             session = self._ensure_session()
             page = session.open_creator_video_page()

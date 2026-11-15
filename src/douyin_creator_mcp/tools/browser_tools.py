@@ -6,7 +6,11 @@ from typing import Any
 
 from fastmcp import Context
 
-from ..responses import response_from_exception, success_response
+from ..responses import (
+    response_from_exception,
+    sanitize_payload,
+    success_response,
+)
 
 
 def register_browser_tools(mcp: Any, services: Any | None = None) -> None:
@@ -134,6 +138,51 @@ def register_browser_tools(mcp: Any, services: Any | None = None) -> None:
             ctx,
             "list_videos", limit=limit, offset=offset, filters=filters, sort=sort
         )
+
+    @mcp.tool()
+    def douyin_browser_get_video_comments(
+        ctx: Context,
+        video_id: str,
+        limit: int = 50,
+        cursor: str | None = None,
+        keyword: str | None = None,
+        recent: int | None = None,
+    ) -> dict[str, Any]:
+        """采集指定作品可见评论区的评论与商单意向 insights（v1，不落库）。
+
+        参数：
+        - video_id：平台作品 id；传 "recent" 时按 recent 取最近 N 条本地作品。
+        - limit：本次返回的评论上限，1..200，内部按 50/页翻页。
+        - cursor：上一页返回的 next_cursor，用于继续翻阅。
+        - keyword：仅返回正文命中该关键词的评论。
+        - recent：video_id="recent" 时生效，默认 2，上限 20。
+
+        返回（节选）：status / error_code / video_id / fetched_at / comments /
+        total / total_comment_count / sampled / completeness / rate_limited /
+        has_more / next_cursor / insights / parser_version / warnings。
+
+        - status：completed | partial | aborted_risk_control |
+          user_action_required | parse_failed。
+        - sampled：三态 true | false | null；与 completeness
+          (truncated | complete | unknown) 同步返回，null 表示完整性未知。
+        - total_comment_count：平台显示总数，取不到为 null，不估算。
+        - rate_limited：同一作品当天已采集过时为 true，仍返回 completed 正常结构。
+        - 风控/验证出现时立即停止，不自动重试。
+        - 评论区结构无法识别时返回 parse_failed + error_code=DOM_MISMATCH，
+          不等于 0 条评论。
+        """
+        try:
+            container = resolve(ctx)
+            result = container.comments_service.get_video_comments(
+                video_id,
+                limit=limit,
+                cursor=cursor,
+                keyword=keyword,
+                recent=recent,
+            )
+            return sanitize_payload(result, data_dir=container.settings.data_dir)
+        except Exception as exc:
+            return response_from_exception(exc)
 
     @mcp.tool()
     def douyin_browser_get_video_performance(

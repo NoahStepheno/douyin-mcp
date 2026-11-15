@@ -302,6 +302,7 @@ douyin-mcp status
 | `douyin_browser_sync_creator_data` | 同步作品列表和列表指标 |
 | `douyin_browser_sync_video_details` | 分批同步指定或近期作品详情指标 |
 | `douyin_browser_list_videos` | 分页查询作品和最新指标 |
+| `douyin_browser_get_video_comments` | 采集指定/近期作品可见评论与商单意向 insights（v1，不落库） |
 | `douyin_browser_get_video_performance` | 查询单作品快照和派生指标 |
 | `douyin_browser_compare_videos` | 对比 2～20 条作品 |
 | `douyin_browser_get_metric_coverage` | 查询字段覆盖率和缺失原因 |
@@ -321,6 +322,52 @@ douyin-mcp status
 </details>
 
 所有工具使用内部账号键 `browser-default`，Agent 无需传递账号 ID。常见业务状态包括 `completed`、`partial`、`cache_hit` 和 `user_action_required`。
+
+### 视频评论采集（v1）
+
+`douyin_browser_get_video_comments(video_id, limit=50, cursor=None, keyword=None, recent=None)`
+只读取当前可见作品页评论区的 DOM，不调用私有接口、不绕过验证。v1 不落库、不展开二级回复。
+
+```jsonc
+{
+  "status": "completed | partial | aborted_risk_control | user_action_required | parse_failed",
+  "error_code": null,
+  "video_id": "...",
+  "fetched_at": "2026-11-15T12:00:00+08:00",
+  "comments": [{"comment_id": "...", "content": "...", "author_nickname": "...",
+                "like_count": 3, "reply_count": 0,
+                "posted_at": "2026-11-15T09:00:00+08:00",
+                "posted_at_precision": "exact | approx | unknown",
+                "is_pinned": false, "is_author_reply": false}],
+  "total": 1,
+  "total_comment_count": 12,
+  "sampled": true,
+  "completeness": "truncated",
+  "rate_limited": false,
+  "has_more": true,
+  "next_cursor": "offset:50",
+  "insights": {"total_comments": 1, "excluded_author_replies": 0,
+               "categories": {"求链接": 0, "提问": 0, "负反馈": 0, "正反馈": 0},
+               "multi_label": true, "keyword_rule_version": "comment-keywords-v1",
+               "top_words": [{"word": "链接", "count": 1}]},
+  "parser_version": "comment-panel-v1",
+  "warnings": []
+}
+```
+
+字段语义与缺失值：
+
+- `total_comment_count`：平台显示的总评论数；页面没有明确数字时为 `null`，不估算。
+- `sampled` / `completeness`：三态。总数已知且返回数少于总数、或被 `limit` 截断 → `true` / `"truncated"`；总数已知且相等、或明确空态 → `false` / `"complete"`；总数不可得且未截断 → `null` / `"unknown"`（完整性未知，绝不能读成“全量”）。
+- `rate_limited`：本地 guard（`DATA_DIR/comment_collection_guard.json`，按 video_id + 日期）显示当天已采集时为 `true`；此时仍返回 `status=completed` 的正常结构，不抛错、不再访问评论页。
+- `parse_failed` + `error_code=DOM_MISMATCH`：评论区结构未识别，**不等于 0 条评论**；只有页面明确出现「暂无评论」等空态文案才返回 `completed` + `comments=[]`。
+- `aborted_risk_control` + `error_code=RISK_CONTROL`：出现验证/风控立即停止，不自动重试。
+- `posted_at_precision`：相对时间按 `fetched_at` 倒推并标 `approx`；完整日期时间标 `exact`；无法解析时 `posted_at=null` + `unknown`。
+- `video_id="recent"` 时 `total_comment_count` 为 `null`（跨作品求和非平台展示值），每个评论项额外带 `video_id`，并用 `videos` 列出逐作品状态。
+- 明确空态（「暂无评论」等）即使页面没有数字总数也返回 `sampled=false` / `completeness="complete"`。
+- 昵称保留（评论者公开昵称），并通过 `responses.py` 的字符串脱敏通道处理 header/URL/路径；任何路径都不返回 cookie、header、用户 id、头像 URL 或主页链接。注意：调用方（MCP 客户端/模型服务）会收到评论文本与昵称，请自行确认平台外处理与向第三方提供的合规边界。
+- 分类为关键词多标签（`multi_label=true`），词表可用 `DATA_DIR/comment_keywords.json` 覆盖，返回实际生效的 `keyword_rule_version`。
+- `parser_version=comment-panel-v1` 由 `browser/comments.py` 维护；评论面板 DOM 漂移时用它追踪解析版本。
 
 ### 文案流水线配置
 

@@ -36,6 +36,11 @@ class Settings:
     douyin_comment_nav_retry_min_seconds: float = 2.0
     douyin_comment_nav_retry_max_seconds: float = 3.0
     douyin_risk_cooldown_hours: int = 12
+    douyin_account_overview_url: str = (
+        "https://creator.douyin.com/creator-micro/home"
+    )
+    douyin_account_overview_settle_ms: int = 12000
+    douyin_account_overview_timeout_ms: int = 20000
     transcript_ingestion_enabled: bool = False
     transcript_pipeline_version: str = "transcript-v1"
     transcript_worker_count: int = 1
@@ -186,6 +191,18 @@ def load_settings(
         ),
         douyin_risk_cooldown_hours=_get_int(
             merged, "DOUYIN_RISK_COOLDOWN_HOURS", 12
+        ),
+        douyin_account_overview_url=_get(
+            merged,
+            "DOUYIN_ACCOUNT_OVERVIEW_URL",
+            "https://creator.douyin.com/creator-micro/home",
+        ),
+        douyin_account_overview_settle_ms=max(
+            0, _get_int(merged, "DOUYIN_ACCOUNT_OVERVIEW_SETTLE_MS", 12000)
+        ),
+        douyin_account_overview_timeout_ms=max(
+            1000,
+            _get_int(merged, "DOUYIN_ACCOUNT_OVERVIEW_TIMEOUT_MS", 20000),
         ),
         transcript_ingestion_enabled=_get_bool(
             merged, "TRANSCRIPT_INGESTION_ENABLED", False

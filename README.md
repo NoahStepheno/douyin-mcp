@@ -303,6 +303,7 @@ douyin-mcp status
 | `douyin_browser_sync_video_details` | 分批同步指定或近期作品详情指标 |
 | `douyin_browser_list_videos` | 分页查询作品和最新指标 |
 | `douyin_browser_get_video_comments` | 采集指定/近期作品可见评论与商单意向 insights（v1，不落库） |
+| `douyin_browser_get_account_overview` | 读取创作者中心「账号总览」的账号级区间指标（7d/30d/昨日） |
 | `douyin_browser_get_video_performance` | 查询单作品快照和派生指标 |
 | `douyin_browser_compare_videos` | 对比 2～20 条作品 |
 | `douyin_browser_get_metric_coverage` | 查询字段覆盖率和缺失原因 |
@@ -406,6 +407,50 @@ PYENV_VERSION=3.11.11 .venv/bin/python scripts/probe_comment_dom.py \
   二次失败仍返回 `retryable=true`，风控/验证类错误绝不重试。
 - `parser_version=comment-panel-v2` 由 `browser/comments.py` 维护；评论面板 DOM 漂移时用它追踪解析版本。
 
+
+### 账号总览（v1）
+
+`douyin_browser_get_account_overview(period="7d")`，`period ∈ {yesterday, 7d, 30d}`。
+页面为 `creator.douyin.com/creator-micro/home` 主 frame，**懒加载约 10–12 秒**：
+完成判定以 DOM 语义信号为准（出现「账号总览」区块且区块内至少 1 个数字指标），
+`DOUYIN_ACCOUNT_OVERVIEW_SETTLE_MS`（默认 12000）只是兜底等待，
+`DOUYIN_ACCOUNT_OVERVIEW_TIMEOUT_MS`（默认 20000）为上限；超时返回
+`parse_failed` + `reason=account_overview_not_rendered`，绝不返回 `completed` + 全 null。
+不使用 `networkidle` 等网络静默策略。
+
+字段与真实来源（`parser_version=account-overview-v1`）：
+
+| 字段 | 页面来源 | 缺失语义 |
+|---|---|---|
+| `account_play_count` | 「账号总览」→ 播放量 | `not_displayed` |
+| `account_play_delta` | 播放量项的「较前N日+N」 | 30d 无对照文案 → `not_displayed` |
+| `profile_visit_count_period` | 「账号总览」→ 主页访问量（区间量，不是累计） | `not_displayed` |
+| `profile_visit_delta` | 主页访问量项的「较前N日+N」 | `not_displayed` |
+| `work_like_count_period` / `work_share_count_period` / `work_comment_count_period` | 作品点赞 / 作品分享 / 作品评论（作品维度·区间量） | `not_displayed` |
+| `net_follower_gain` | 净增粉丝（账号级，不摊到单条作品） | `not_displayed` |
+| `like_total` | 文本锚点「获赞」+ 同级数字节点 | 锚点/数字缺失 → `not_displayed` |
+| `follower_indicator` | `#guide_home_fans` 的标签 + 数字 | 缺数字 → `not_displayed` |
+
+- **陷阱**：首页「最新作品」区块的播放量（实测 950）是单条视频，不是账号播放量；
+  解析严格限定在「账号总览」面板内，950 不会进入任何账号级字段。
+- `period_start` / `period_end` 从「统计周期：YYYY.MM.DD-YYYY.MM.DD」解析；
+  **7d 模式下该文本可能不存在**，此时为 `null` 并给 warning，不硬失败。
+口径对照（避免把区间量与累计量混读）：
+
+| 字段 | 维度 | 语义 |
+|---|---|---|
+| `account_play_count` / `profile_visit_count_period` / `work_*_period` / `net_follower_gain` | 账号或作品维度 | **区间量**（当前 period 内） |
+| `like_total` | 账号维度 | 历史累计获赞（文本锚点「获赞」） |
+| `follower_indicator` | 账号维度 | 平台标签 + 数值；标签实测「粉丝指数」，语义未确认 |
+| `account_play_delta` / `profile_visit_delta` | 账号维度 | 与「较前N日」对照的区间差；30d 无对照文案时为 `null` + `not_displayed`（不是 0） |
+
+- `follower_indicator` 只返回平台标签（实测「粉丝指数」）与数值，**语义未确认，不可当作粉丝数量**；
+  标签变化时返回实际标签文本，不硬编码；返回体不提供该口径的独立字段。
+- 每日限频：key = `账号 + period + 本地日期`（`DATA_DIR/account_overview_guard.json`）；
+  命中返回正常结构 + `rate_limited=true`（`status=completed`，字段 `missing_reason=rate_limited`），不访问浏览器。
+- 风控命中：`aborted_risk_control`，并激活 #6 的账号级冷却（评论采集会被该冷却拦截；账号总览自身不预拦截）。
+- 结构不匹配：`parse_failed` + `DOM_MISMATCH`，`reason` 区分
+  `account_overview_not_rendered` / `period_not_switchable`。
 
 ### 风控冷却与跳过计数
 

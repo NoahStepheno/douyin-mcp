@@ -12,6 +12,7 @@ from .config import Settings, ensure_runtime_dirs
 from .content.asr import AudioExtractor, ControlledProcessRunner, FasterWhisperTranscriber
 from .content.media import FFprobe, SecureMediaDownloader
 from .instance_lock import InstanceLock
+from .services.account_overview import AccountOverviewService
 from .services.browser_service import BrowserService
 from .services.comments import CommentsService
 from .services.risk_state import RiskCooldown, SkippedEventLog
@@ -28,6 +29,7 @@ class ServiceContainer:
     db: Database
     browser_service: BrowserService
     comments_service: CommentsService
+    account_overview_service: AccountOverviewService
     browser_executor: BrowserExecutor
     transcript_repository: TranscriptRepository
     transcript_query: TranscriptQueryService
@@ -146,6 +148,11 @@ class Runtime:
                     browser_executor=browser_executor,
                     risk_cooldown=risk_cooldown,
                     skipped_log=skipped_log,
+                ),
+                account_overview_service=AccountOverviewService(
+                    self.settings,
+                    browser_executor=browser_executor,
+                    risk_cooldown=risk_cooldown,
                 ),
                 browser_executor=browser_executor,
                 transcript_repository=repository,

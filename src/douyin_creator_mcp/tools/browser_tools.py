@@ -185,6 +185,41 @@ def register_browser_tools(mcp: Any, services: Any | None = None) -> None:
             return response_from_exception(exc)
 
     @mcp.tool()
+    def douyin_browser_get_account_overview(
+        ctx: Context,
+        period: str = "7d",
+    ) -> dict[str, Any]:
+        """读取创作者中心首页「账号总览」（账号级区间指标）。
+
+        参数：
+        - period：yesterday | 7d | 30d（页面「时间」选择器）。
+
+        返回：status / period / period_start / period_end / captured_at /
+        account_play_count / account_play_delta / profile_visit_count_period /
+        profile_visit_delta / work_like_count_period / work_share_count_period /
+        work_comment_count_period /
+        net_follower_gain / like_total / follower_indicator /
+        parser_version / warnings。
+
+        - 每个指标独立 ``{"value", "missing_reason"}``；取不到为 null +
+          ``missing_reason=not_displayed``，不估算、不用其它数字兜底。
+        - ``follower_indicator`` 只返回平台标签（如「粉丝指数」）与数值，语义未确认，
+          不可当作粉丝数量。
+        - 账号总览懒加载约 10–12s，完成判定以「账号总览」区块出现且含数字指标为准；
+          超时返回 parse_failed + reason=account_overview_not_rendered。
+        - 同一账号 + 时间范围每天最多 1 次；命中返回正常结构 + rate_limited=true。
+        - 风控命中返回 aborted_risk_control 并激活账号级冷却（不自动重试）。
+        """
+        try:
+            container = resolve(ctx)
+            result = container.account_overview_service.get_account_overview(
+                period=period
+            )
+            return sanitize_payload(result, data_dir=container.settings.data_dir)
+        except Exception as exc:
+            return response_from_exception(exc)
+
+    @mcp.tool()
     def douyin_browser_get_video_performance(
         ctx: Context,
         video_id: str,

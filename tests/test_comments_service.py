@@ -400,6 +400,7 @@ def test_terminal_statuses_always_expose_total_comment_count(settings: Any) -> N
             settings,
             {VIDEO_ID: make_observation([], state=state, exhausted=False)},
         )
+        (settings.data_dir / "risk_cooldown.json").unlink(missing_ok=True)
         result = service.get_video_comments(VIDEO_ID)
         assert result["status"] == expected
         assert "total_comment_count" in result

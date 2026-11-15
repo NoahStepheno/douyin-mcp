@@ -26,6 +26,8 @@ from ..browser.comments import (
     STATE_RISK_CONTROL,
     STATE_UNKNOWN,
     collect_comments,
+    is_not_public_url,
+    sanitize_final_url,
 )
 from ..browser.commands import CollectComments
 from ..errors import (
@@ -36,6 +38,11 @@ from ..errors import (
 )
 from .browser_service import BROWSER_DEFAULT_ACCOUNT_ID
 from .comment_insights import build_insights, load_keyword_rules
+from .risk_state import (
+    RiskCooldown,
+    SkippedEventLog,
+    build_cooldown_skip_payload,
+)
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 COMMENT_GUARD_FILENAME = "comment_collection_guard.json"
@@ -156,6 +163,8 @@ class CommentsService:
         guard: CommentDailyGuard | None = None,
         retry_delay: tuple[float, float] | None = None,
         sleep: Callable[[float], None] | None = None,
+        risk_cooldown: RiskCooldown | None = None,
+        skipped_log: SkippedEventLog | None = None,
     ) -> None:
         self.settings = settings
         self.db = db
@@ -182,6 +191,15 @@ class CommentsService:
             retry_delay = (retry_min, max(retry_min, retry_max))
         self._retry_delay = retry_delay
         self._sleep = sleep or time.sleep
+        self._risk_cooldown = risk_cooldown or RiskCooldown(
+            Path(settings.data_dir), now=self._now
+        )
+        self._skipped_log = skipped_log or SkippedEventLog(
+            Path(settings.data_dir), now=self._now
+        )
+        self._cooldown_hours = int(
+            getattr(settings, "douyin_risk_cooldown_hours", 12)
+        )
 
     def get_video_comments(
         self,
@@ -199,25 +217,36 @@ class CommentsService:
         target = str(video_id or "").strip()
         if not target:
             raise AppError(VALIDATION_ERROR, "video_id 不能为空。")
-        if target == "recent":
+        cooldown = self._risk_cooldown.status()
+        if cooldown.get("active"):
+            # The skipped counter is recorded exactly once, at the single exit
+            # below; inner helpers must never record it themselves.
+            result = self._cooldown_skipped_result(target, cooldown)
+        elif target == "recent":
             recent_count = self._validate_recent(recent)
-            return self._get_recent_comments(
+            result = self._get_recent_comments(
                 recent_count,
                 limit=limit,
                 offset=offset,
                 keyword=normalized_keyword,
             )
-        if not VIDEO_ID_PATTERN.match(target):
-            raise AppError(
-                VALIDATION_ERROR,
-                "video_id 必须是平台作品 id（字母数字、下划线或连字符）。",
+        else:
+            if not VIDEO_ID_PATTERN.match(target):
+                raise AppError(
+                    VALIDATION_ERROR,
+                    "video_id 必须是平台作品 id（字母数字、下划线或连字符）。",
+                )
+            result = self._get_single_video_comments(
+                target,
+                limit=limit,
+                offset=offset,
+                keyword=normalized_keyword,
             )
-        return self._get_single_video_comments(
-            target,
-            limit=limit,
-            offset=offset,
-            keyword=normalized_keyword,
-        )
+        if result["status"] == STATUS_ABORTED_RISK_CONTROL:
+            self._risk_cooldown.activate(self._cooldown_hours)
+        if result["status"] == "skipped" and result.get("reason"):
+            self._skipped_log.record(str(result["reason"]))
+        return result
 
     # Single video -----------------------------------------------------
 
@@ -312,6 +341,10 @@ class CommentsService:
     ) -> dict[str, Any]:
         warnings = list(rule_warnings)
         state = str(observation.get("state") or STATE_UNKNOWN)
+        if state != STATE_VIDEO_NOT_PUBLIC:
+            final_url_warning = self._final_url_warning(observation, video_id)
+            if final_url_warning:
+                warnings.append(final_url_warning)
         base = self._base_payload(video_id, fetched_at)
 
         if state == STATE_RISK_CONTROL:
@@ -704,6 +737,37 @@ class CommentsService:
             "rate_limited": False,
             "reason": None,
             "parser_version": COMMENT_PARSER_VERSION,
+        }
+
+    def _final_url_warning(
+        self, observation: dict[str, Any], video_id: str
+    ) -> str | None:
+        final_url = str(observation.get("final_url") or "").strip()
+        if not final_url or is_not_public_url(final_url):
+            return None
+        requested = str(
+            self.settings.douyin_web_video_url_template.format(video_id=video_id)
+        ).strip()
+        if final_url.rstrip("/") == requested.rstrip("/"):
+            return None
+        return f"final_url={sanitize_final_url(final_url)}"
+
+    def _cooldown_skipped_result(
+        self, video_id: str, cooldown: dict[str, Any]
+    ) -> dict[str, Any]:
+        fetched_at = self._now().astimezone(SHANGHAI)
+        rules, rule_version, _ = load_keyword_rules(self.settings.data_dir)
+        return {
+            **self._base_payload(video_id, fetched_at),
+            **build_cooldown_skip_payload(cooldown),
+            "comments": [],
+            "total": 0,
+            "total_comment_count": None,
+            "sampled": None,
+            "completeness": "unknown",
+            "has_more": False,
+            "next_cursor": None,
+            "insights": build_insights([], rules, rule_version),
         }
 
     def _rate_limited_result(

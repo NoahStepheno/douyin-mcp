@@ -35,6 +35,7 @@ class Settings:
     douyin_comment_settle_ms: int = 600
     douyin_comment_nav_retry_min_seconds: float = 2.0
     douyin_comment_nav_retry_max_seconds: float = 3.0
+    douyin_risk_cooldown_hours: int = 12
     transcript_ingestion_enabled: bool = False
     transcript_pipeline_version: str = "transcript-v1"
     transcript_worker_count: int = 1
@@ -183,6 +184,9 @@ def load_settings(
                 3.0,
             ),
         ),
+        douyin_risk_cooldown_hours=_get_int(
+            merged, "DOUYIN_RISK_COOLDOWN_HOURS", 12
+        ),
         transcript_ingestion_enabled=_get_bool(
             merged, "TRANSCRIPT_INGESTION_ENABLED", False
         ),
@@ -256,6 +260,11 @@ def load_settings(
         ),
     )
     _validate_transcript_settings(settings)
+    if settings.douyin_risk_cooldown_hours not in {6, 12, 24}:
+        raise AppError(
+            CONFIGURATION_ERROR,
+            "DOUYIN_RISK_COOLDOWN_HOURS must be one of 6, 12, 24.",
+        )
     return settings
 
 

@@ -46,6 +46,7 @@ from ..errors import (
 )
 from ..storage.db import Database
 from .metrics import FORMULA_VERSION, compute_derived_metrics, percentile_rank
+from .risk_state import RiskCooldown, SkippedEventLog
 
 
 BROWSER_DEFAULT_ACCOUNT_ID = "browser-default"
@@ -64,6 +65,8 @@ class BrowserService:
         db: Database,
         session_factory: Callable[[], BrowserSession] | None = None,
         browser_executor: BrowserExecutor | None = None,
+        risk_cooldown: RiskCooldown | None = None,
+        skipped_log: SkippedEventLog | None = None,
     ) -> None:
         self.settings = settings
         self.db = db
@@ -71,6 +74,8 @@ class BrowserService:
         self._session: BrowserSession | None = None
         self._active_profile_lock: ProfileLock | None = None
         self._browser_executor = browser_executor
+        self._risk_cooldown = risk_cooldown or RiskCooldown(settings.data_dir)
+        self._skipped_log = skipped_log or SkippedEventLog(settings.data_dir)
 
     # Login and status -------------------------------------------------
 
@@ -144,6 +149,7 @@ class BrowserService:
             "SELECT status, created_at FROM browser_snapshots ORDER BY created_at DESC LIMIT 1"
         )
         coverage = self.get_metric_coverage()
+        risk_cooldown = self._risk_cooldown.status()
         account_binding = self._public_account_binding(
             self.db.query_one(
                 "SELECT account_id, anchor_count, created_at, last_verified_at "
@@ -171,7 +177,13 @@ class BrowserService:
             "profile_lock": self._public_profile_lock(self._profile_lock().inspect()),
             "account_binding": account_binding,
             "coverage": coverage["coverage"],
-            "warnings": coverage["warnings"],
+            # Read-only diagnostics stay available during a cooldown.
+            "risk_cooldown": risk_cooldown,
+            "skipped_last_7d": self._skipped_log.counts_last_7d(),
+            "warnings": [
+                *coverage["warnings"],
+                *risk_cooldown.get("warnings", []),
+            ],
         }
 
     def sync_if_needed(
@@ -236,9 +248,16 @@ class BrowserService:
         if mode == "background_first":
             warnings.append("后台模式失败或触发验证时，将要求用户在可见浏览器中重新扫码。")
         statuses = {str(item.get("status")) for item in results.values()}
-        status = "cache_hit" if statuses == {"cache_hit"} else (
-            "partial" if "partial" in statuses or "user_action_required" in statuses else "completed"
-        )
+        if statuses == {"cache_hit"}:
+            status = "cache_hit"
+        elif statuses == {"skipped"}:
+            status = "skipped"
+        elif "skipped" in statuses:
+            status = "partial"
+        elif "partial" in statuses or "user_action_required" in statuses:
+            status = "partial"
+        else:
+            status = "completed"
         return {
             "status": status,
             "scope": scope,
@@ -341,6 +360,7 @@ class BrowserService:
                     "phase": "list_sync",
                 }
                 self._finish_job(job_id, job_status, progress=progress, coverage=coverage)
+                self._activate_cooldown_on_verification(snapshot["login_status"])
                 warnings = self._sync_notes(snapshot["login_status"], job_status)
                 return {
                     "sync_job_id": job_id,
@@ -496,6 +516,8 @@ class BrowserService:
                         )
                         continue
                     login_status = detail["login_status"]
+                    if login_status == VERIFICATION_REQUIRED:
+                        self._activate_cooldown_on_verification(login_status)
                     if login_status in {LOGIN_REQUIRED, VERIFICATION_REQUIRED}:
                         if mode == "background_first":
                             self.close_browser()
@@ -1906,6 +1928,19 @@ class BrowserService:
     @staticmethod
     def _job_status_from_login_status(login_status: str) -> str:
         return "user_action_required" if login_status in {LOGIN_REQUIRED, VERIFICATION_REQUIRED} else "completed"
+
+    def _activate_cooldown_on_verification(self, login_status: str) -> None:
+        """A sync that itself hits verification still arms the shared cooldown.
+
+        The cooldown only blocks comment collection later; list/detail sync is
+        never pre-blocked by a comment cooldown.
+        """
+
+        if login_status != VERIFICATION_REQUIRED:
+            return
+        self._risk_cooldown.activate(
+            int(getattr(self.settings, "douyin_risk_cooldown_hours", 12))
+        )
 
     @staticmethod
     def _login_next_action(login_status: str) -> dict[str, Any] | None:

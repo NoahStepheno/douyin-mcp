@@ -489,3 +489,50 @@ def test_sync_collection_is_blocked_by_cooldown_without_browser(
     # No browser session/executor was created by either call.
     assert service._session is None
     assert service._browser_executor is None
+
+
+def test_skipped_counter_increments_exactly_once_per_call(
+    settings: Any,
+) -> None:
+    clock = Clock()
+    service, executor = _service(
+        settings,
+        {
+            VIDEO_ID: make_observation([], state="risk_control"),
+            OTHER_VIDEO_ID: make_observation([], state="video_not_public"),
+        },
+        clock,
+    )
+    log = SkippedEventLog(settings.data_dir, now=clock)
+
+    # #3 skip: exactly +1 video_not_public.
+    service.get_video_comments(OTHER_VIDEO_ID)
+    assert log.counts_last_7d() == {"video_not_public": 1}
+
+    # Risk hit activates the cooldown; aborted_risk_control is not a skip.
+    service.get_video_comments(VIDEO_ID)
+    assert log.counts_last_7d() == {"video_not_public": 1}
+
+    # Cooldown skip: exactly +1 risk_control_cooldown (not +2).
+    service.get_video_comments(OTHER_VIDEO_ID)
+    assert log.counts_last_7d() == {
+        "risk_control_cooldown": 1,
+        "video_not_public": 1,
+    }
+    assert len(executor.commands) == 2
+
+    # The sync path also records once per blocked call.
+    browser_service = BrowserService(
+        settings,
+        FakeDB(),  # type: ignore[arg-type]
+        risk_cooldown=RiskCooldown(settings.data_dir, now=clock),
+        skipped_log=log,
+    )
+    browser_service.sync_creator_data()
+    assert log.counts_last_7d()["risk_control_cooldown"] == 2
+
+    # And get_status reports exactly those counters.
+    assert browser_service.get_status()["skipped_last_7d"] == {
+        "risk_control_cooldown": 2,
+        "video_not_public": 1,
+    }

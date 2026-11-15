@@ -186,13 +186,12 @@ class BrowserService:
             ],
         }
 
-    def _risk_cooldown_skip(self, **extra: Any) -> dict[str, Any] | None:
-        """Return a skipped payload while the account is cooling down."""
+    def _cooldown_skipped_payload(self, **extra: Any) -> dict[str, Any] | None:
+        """Build a skipped payload; recording is the caller's single job."""
 
         state = self._risk_cooldown.status()
         if not state.get("active"):
             return None
-        self._skipped_log.record("risk_control_cooldown")
         remaining = int(state.get("remaining_seconds") or 0)
         return {
             "status": "skipped",
@@ -297,10 +296,11 @@ class BrowserService:
         mode: str = "visible",
         force: bool = False,
     ) -> dict[str, Any]:
-        cooldown_skip = self._risk_cooldown_skip(
+        cooldown_skip = self._cooldown_skipped_payload(
             account_id=account_id, mode=mode, scope="details"
         )
         if cooldown_skip is not None:
+            self._skipped_log.record("risk_control_cooldown")
             return cooldown_skip
         require_platform_risk_acknowledgement(self.settings.data_dir)
         self._validate_mode(mode)
@@ -442,10 +442,11 @@ class BrowserService:
         mode: str = "visible",
         account_id: str = BROWSER_DEFAULT_ACCOUNT_ID,
     ) -> dict[str, Any]:
-        cooldown_skip = self._risk_cooldown_skip(
+        cooldown_skip = self._cooldown_skipped_payload(
             account_id=account_id, mode=mode, scope="details"
         )
         if cooldown_skip is not None:
+            self._skipped_log.record("risk_control_cooldown")
             return cooldown_skip
         require_platform_risk_acknowledgement(self.settings.data_dir)
         self._validate_mode(mode)

@@ -220,9 +220,10 @@ class CommentsService:
             raise AppError(VALIDATION_ERROR, "video_id 不能为空。")
         cooldown = self._risk_cooldown.status()
         if cooldown.get("active"):
-            self._skipped_log.record("risk_control_cooldown")
-            return self._cooldown_skipped_result(target, cooldown)
-        if target == "recent":
+            # The skipped counter is recorded exactly once, at the single exit
+            # below; inner helpers must never record it themselves.
+            result = self._cooldown_skipped_result(target, cooldown)
+        elif target == "recent":
             recent_count = self._validate_recent(recent)
             result = self._get_recent_comments(
                 recent_count,

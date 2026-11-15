@@ -62,8 +62,10 @@ STATE_COMMENTS = "comments"
 STATE_EMPTY = "empty"
 STATE_RISK_CONTROL = "risk_control"
 STATE_LOGIN_REQUIRED = "login_required"
+STATE_COMMENTS_DISABLED = "comments_disabled"
 STATE_UNKNOWN = "unknown"
 
+REASON_COMMENTS_DISABLED = "comments_disabled"
 REASON_PANEL_NOT_OPENED = "panel_not_opened"
 REASON_PANEL_OPENED_BUT_NO_ITEMS = "panel_opened_but_no_items"
 REASON_SELECTORS_NOT_MATCHED = "selectors_not_matched"
@@ -83,6 +85,39 @@ def _parse_count_text(value: Any) -> int | None:
         return None
 
 
+_TOTAL_PATTERNS = (
+    re.compile(r"共\s*(\d[\d,.]*)\s*([万亿]?)\s*条评论"),
+    re.compile(r"全部评论\s*[（(]\s*(\d[\d,.]*)\s*([万亿]?)\s*[)）]"),
+    re.compile(r"评论\s*[（(]\s*(\d[\d,.]*)\s*([万亿]?)\s*[)）]"),
+    re.compile(r"(\d[\d,.]*)\s*([万亿]?)\s*条评论"),
+)
+
+
+def parse_total_comment_count(text: Any) -> int | None:
+    """Parse the platform-declared total from header text only.
+
+    Never derives the total from the number of parsed items. Returns ``None``
+    when the panel does not display a numeric total.
+    """
+
+    source = str(text or "")
+    if not source:
+        return None
+    for pattern in _TOTAL_PATTERNS:
+        match = pattern.search(source)
+        if not match:
+            continue
+        multiplier = {"": 1, "万": 10_000, "亿": 100_000_000}.get(
+            match.group(2) if match.lastindex and match.lastindex >= 2 else ""
+        )
+        try:
+            number = float(match.group(1).replace(",", ""))
+            return int(number * multiplier)
+        except (ValueError, TypeError):
+            continue
+    return None
+
+
 def _dedupe_key(item: dict[str, Any], video_id: str) -> str:
     explicit = str(item.get("comment_id") or "").strip()
     if explicit:
@@ -100,17 +135,40 @@ def _dedupe_key(item: dict[str, Any], video_id: str) -> str:
     return digest[:16]
 
 
+def _iso(moment: datetime) -> str:
+    return moment.astimezone(SHANGHAI).replace(microsecond=0).isoformat()
+
+
+_TIME_TAIL_RE = re.compile(r"\s*[·•]\s*[^\s·•]+\s*$")
+_TIME_NOISE_RE = re.compile(r"\s*(作者赞过|置顶)\s*$")
+
+
+def _clean_time_text(value: Any) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    for _ in range(2):
+        # Action/noise fragments can trail the timestamp before/after the region.
+        text = _TIME_NOISE_RE.sub("", text).strip()
+        # Real DOM appends the IP region: "1小时前·云南", "1天前·河北".
+        text = _TIME_TAIL_RE.sub("", text).strip()
+    return text
+
+
 def parse_comment_time(
     value: Any, collected_at: datetime
 ) -> tuple[str | None, str]:
     """Back-date a rendered comment time and report its precision.
 
-    Returns ``(iso8601_or_none, precision)`` with precision in
-    ``{"exact", "approx", "unknown"}``. Relative texts are subtracted from
-    ``collected_at`` (Asia/Shanghai) and always reported as ``approx``.
+    Precision ladder (v2):
+
+    * ``刚刚`` / ``N 分钟前`` / ``N 小时前`` / ``N 天前`` / ``昨天 HH:MM`` /
+      ``前天`` -> ``approx`` (relative to ``collected_at``);
+    * full date containing a year (``2026-11-14`` / ``2026年11月14日``) ->
+      ``exact``;
+    * month-day only (``11-14``), year inferred -> ``approx``;
+    * unparseable -> ``(None, "unknown")``.
     """
 
-    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    text = _clean_time_text(value)
     if not text:
         return None, "unknown"
     reference = collected_at.astimezone(SHANGHAI)
@@ -144,6 +202,13 @@ def parse_comment_time(
         )
         return _iso(moment), "approx"
 
+    if text in {"昨天", "前天", "今天"}:
+        offset = {"今天": 0, "昨天": 1, "前天": 2}[text]
+        moment = (reference - timedelta(days=offset)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        return _iso(moment), "approx"
+
     time_only = re.match(r"^(\d{1,2}):(\d{2})$", text)
     if time_only:
         moment = reference.replace(
@@ -156,16 +221,16 @@ def parse_comment_time(
             moment -= timedelta(days=1)
         return _iso(moment), "approx"
 
-    date_value, has_time = _split_date_time(text, reference)
+    date_value, precision = _split_date_time(text, reference)
     if date_value is not None:
-        return _iso(date_value), ("exact" if has_time else "approx")
+        return _iso(date_value), precision
 
     return None, "unknown"
 
 
 def _split_date_time(
     text: str, reference: datetime
-) -> tuple[datetime | None, bool]:
+) -> tuple[datetime | None, str]:
     normalized = (
         text.replace("年", "-")
         .replace("月", "-")
@@ -187,28 +252,29 @@ def _split_date_time(
             if has_time:
                 if len(groups) == 5:
                     year, month, day, hour, minute = groups
+                    precision = "exact"
                 else:
                     year = reference.year
                     month, day, hour, minute = groups
-                return datetime(
+                    precision = "approx"
+                moment = datetime(
                     year, month, day, hour, minute, tzinfo=SHANGHAI
-                ), True
-            if len(groups) == 3:
+                )
+            elif len(groups) == 3:
                 year, month, day = groups
+                moment = datetime(year, month, day, tzinfo=SHANGHAI)
+                precision = "exact"
             else:
                 year = reference.year
                 month, day = groups
-            moment = datetime(year, month, day, tzinfo=SHANGHAI)
-            if moment - reference > timedelta(days=1):
-                moment = moment.replace(year=year - 1)
-            return moment, False
+                moment = datetime(year, month, day, tzinfo=SHANGHAI)
+                if moment - reference > timedelta(days=1):
+                    moment = moment.replace(year=year - 1)
+                precision = "approx"
+            return moment, precision
         except ValueError:
-            return None, False
-    return None, False
-
-
-def _iso(moment: datetime) -> str:
-    return moment.astimezone(SHANGHAI).replace(microsecond=0).isoformat()
+            return None, "unknown"
+    return None, "unknown"
 
 
 def normalize_comment_item(
@@ -253,6 +319,7 @@ def collect_comments(
     cursor_offset: int = 0,
     collected_at: datetime | None = None,
     settle_ms: int = 600,
+    panel_timeout_ms: int = 8000,
     max_scroll_rounds: int = MAX_SCROLL_ROUNDS,
     page_size: int = COMMENT_PAGE_SIZE,
     panel_opener: Any | None = None,
@@ -294,30 +361,39 @@ def collect_comments(
         state = STATE_RISK_CONTROL
     elif signals.get("login_wall"):
         state = STATE_LOGIN_REQUIRED
+    elif signals.get("comments_disabled_seen"):
+        state = STATE_COMMENTS_DISABLED
 
     open_result: dict[str, Any] = {}
     if state == STATE_UNKNOWN:
-        open_result = opener(page, settle_ms=settle_ms)
+        open_result = opener(
+            page, settle_ms=settle_ms, timeout_ms=panel_timeout_ms
+        )
         opened_by = open_result.get("strategy")
         if open_result.get("risk_control_seen"):
             state = STATE_RISK_CONTROL
         open_signals = open_result.get("signals") or {}
         if state == STATE_UNKNOWN and open_signals.get("login_wall"):
             state = STATE_LOGIN_REQUIRED
+        if state == STATE_UNKNOWN and open_signals.get("comments_disabled_seen"):
+            state = STATE_COMMENTS_DISABLED
 
     if state == STATE_UNKNOWN:
         observed = read_comment_items(page)
         read_count += 1
+        total_comment_count = parse_total_comment_count(observed.get("header_text"))
         panel_found = bool(observed.get("panel_found"))
         opened = bool(open_result.get("opened")) or bool(
             observed.get("reply_anchor_count")
         )
 
-        if observed.get("empty_seen") and not observed.get("reply_anchor_count"):
+        if observed.get("reply_anchor_count"):
+            state = STATE_COMMENTS
+        elif observed.get("comments_disabled_seen"):
+            state = STATE_COMMENTS_DISABLED
+        elif observed.get("empty_seen"):
             state = STATE_EMPTY
             exhausted = True
-        elif observed.get("reply_anchor_count"):
-            state = STATE_COMMENTS
         elif opened and panel_found:
             reason = REASON_PANEL_OPENED_BUT_NO_ITEMS
         elif opened and not panel_found:
@@ -342,18 +418,19 @@ def collect_comments(
                         continue
                     ordered[key] = normalized
                     ordered_items.append(normalized)
-            if observed.get("total_comment_count") is not None:
-                parsed_total = _parse_count_text(observed.get("total_comment_count"))
-                if parsed_total is not None:
-                    total_comment_count = parsed_total
+            if total_comment_count is None:
+                total_comment_count = parse_total_comment_count(
+                    observed.get("header_text")
+                )
             hint = observed.get("has_more_hint")
             if hint is not None:
                 has_more_hint = bool(hint)
 
             current_count = len(ordered_items)
             if current_count >= window_end:
-                if has_more_hint is False:
-                    exhausted = True
+                # Items already rendered beyond the requested window still count
+                # as "more", even when the list itself ends here.
+                exhausted = has_more_hint is False and current_count <= window_end
                 break
             if has_more_hint is False:
                 exhausted = True

@@ -334,6 +334,8 @@ DOM 中没有评论节点。采集器会先按语义锚点尝试打开评论入�
 `data-e2e` 作为依赖。打不开或打开后没有渲染评论项时返回 `status=parse_failed` +
 `error_code=DOM_MISMATCH`，并用 `reason` 区分：
 
+- `comments_disabled`：页面明确提示「评论已关闭 / 作者已关闭评论」，返回 `error_code=COMMENTS_DISABLED`，
+  不按 `completed` + 0 条处理；
 - `panel_not_opened`：评论入口未命中或面板未打开；
 - `panel_opened_but_no_items`：面板已打开但没有渲染出评论项；
 - `selectors_not_matched`：面板/评论项容器未定位（选择器漂移）。
@@ -370,7 +372,8 @@ PYENV_VERSION=3.11.11 .venv/bin/python scripts/probe_comment_dom.py \
   "next_cursor": "offset:50",
   "insights": {"total_comments": 1, "excluded_author_replies": 0,
                "categories": {"求链接": 0, "提问": 0, "负反馈": 0, "正反馈": 0},
-               "multi_label": true, "keyword_rule_version": "comment-keywords-v1",
+               "multi_label": true, "keyword_rule_version": "comment-keywords-v2",
+               "category_details": {"求链接": {"count": 0, "matched_terms": []}},
                "top_words": [{"word": "链接", "count": 1}]},
   "reason": null,
   "parser_version": "comment-panel-v2",
@@ -390,6 +393,14 @@ PYENV_VERSION=3.11.11 .venv/bin/python scripts/probe_comment_dom.py \
 - 明确空态（「暂无评论」等）即使页面没有数字总数也返回 `sampled=false` / `completeness="complete"`。
 - 昵称保留（评论者公开昵称），并通过 `responses.py` 的字符串脱敏通道处理 header/URL/路径；任何路径都不返回 cookie、header、用户 id、头像 URL 或主页链接。注意：调用方（MCP 客户端/模型服务）会收到评论文本与昵称，请自行确认平台外处理与向第三方提供的合规边界。
 - 分类为关键词多标签（`multi_label=true`），词表可用 `DATA_DIR/comment_keywords.json` 覆盖，返回实际生效的 `keyword_rule_version`。
+  v2（`comment-keywords-v2`）会先去掉空格与标点再匹配，并新增 `求发/原文/在哪/怎么弄/多少钱/教程/求` 等变体；
+  **v1 与 v2 的分类计数不可直接比较**（历史数据请按版本号分段统计）。`categories` 保持原有计数语义，
+  另返回 `category_details[分类] = {"count": N, "matched_terms": [...]}` 供离线核对一致率。
+- `total_comment_count` 只从面板头部解析（`共 N 条评论` / `全部评论(N)` / `N 条评论`），解析不到保持 `null`；
+  **绝不用解析到的条目数冒充总数**。页面/头部声明总数 N>0 但解析到 0 条时返回 `parse_failed` + `DOM_MISMATCH`。
+- 导航竞态（`Execution context was destroyed` 等）会**限速重试 1 次**，随机间隔由
+  `DOUYIN_COMMENT_NAV_RETRY_MIN_SECONDS` / `DOUYIN_COMMENT_NAV_RETRY_MAX_SECONDS` 控制（默认 2–3 秒）；
+  二次失败仍返回 `retryable=true`，风控/验证类错误绝不重试。
 - `parser_version=comment-panel-v2` 由 `browser/comments.py` 维护；评论面板 DOM 漂移时用它追踪解析版本。
 
 ### 文案流水线配置

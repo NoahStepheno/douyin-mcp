@@ -18,15 +18,35 @@ version are used and a warning is returned to the caller.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any, Iterable
 
-COMMENT_KEYWORD_RULE_VERSION = "comment-keywords-v1"
+COMMENT_KEYWORD_RULE_VERSION = "comment-keywords-v2"
 COMMENT_KEYWORDS_FILENAME = "comment_keywords.json"
 TOP_WORDS_LIMIT = 10
 
+#: v2 adds consent/intent variants (求发/原文/在哪/怎么弄/多少钱/教程/求) and
+#: matches after removing whitespace and punctuation. v1 rules are not
+#: comparable with v2 results; the version is always returned.
 DEFAULT_COMMENT_KEYWORDS: dict[str, tuple[str, ...]] = {
-    "求链接": ("链接", "在哪买", "怎么买", "求个", "发我", "私我", "入口", "地址"),
+    "求链接": (
+        "链接",
+        "在哪买",
+        "怎么买",
+        "求个",
+        "发我",
+        "私我",
+        "入口",
+        "地址",
+        "求发",
+        "原文",
+        "在哪",
+        "怎么弄",
+        "多少钱",
+        "教程",
+        "求",
+    ),
     "提问": (
         "怎么",
         "如何",
@@ -105,17 +125,35 @@ def _rules_from_payload(payload: Any) -> dict[str, tuple[str, ...]] | None:
     return rules
 
 
+_NOISE_RE = re.compile(r"[^\w\u4e00-\u9fff]+")
+
+
+def normalize_for_match(content: str) -> str:
+    """Remove whitespace/punctuation before keyword matching (v2 semantics)."""
+
+    return _NOISE_RE.sub("", str(content or "").casefold())
+
+
+def matched_terms(
+    content: str, rules: dict[str, tuple[str, ...]]
+) -> dict[str, list[str]]:
+    """Return ``{category: [term, ...]}`` for every category hit (multi-label)."""
+
+    text = normalize_for_match(content)
+    result: dict[str, list[str]] = {}
+    for category, words in rules.items():
+        hits = [word for word in words if normalize_for_match(word) in text]
+        if hits:
+            result[category] = hits
+    return result
+
+
 def classify_comment(
     content: str, rules: dict[str, tuple[str, ...]]
 ) -> list[str]:
     """Return every category whose keyword appears in ``content`` (multi-label)."""
 
-    text = str(content or "")
-    return [
-        category
-        for category, words in rules.items()
-        if any(word in text for word in words)
-    ]
+    return list(matched_terms(content, rules))
 
 
 def build_insights(
@@ -133,14 +171,17 @@ def build_insights(
     excluded = sum(1 for comment in materialized if comment.get("is_author_reply"))
     analysed = [comment for comment in materialized if not comment.get("is_author_reply")]
     categories = {category: 0 for category in rules}
+    category_terms: dict[str, set[str]] = {category: set() for category in rules}
     word_counts: dict[str, int] = {}
     for comment in analysed:
         content = str(comment.get("content") or "")
-        for category in classify_comment(content, rules):
+        hits_by_category = matched_terms(content, rules)
+        for category, terms in hits_by_category.items():
             categories[category] += 1
+            category_terms[category].update(terms)
         for words in rules.values():
             for word in words:
-                hits = content.count(word)
+                hits = normalize_for_match(content).count(normalize_for_match(word))
                 if hits:
                     word_counts[word] = word_counts.get(word, 0) + hits
     top_words = [
@@ -155,6 +196,14 @@ def build_insights(
         "total_comments": len(analysed),
         "excluded_author_replies": excluded,
         "categories": categories,
+        # v2: per-category audit trail; ``categories`` keeps its count semantics.
+        "category_details": {
+            category: {
+                "count": categories[category],
+                "matched_terms": sorted(category_terms[category]),
+            }
+            for category in rules
+        },
         "multi_label": True,
         "keyword_rule_version": rule_version,
         "top_words": top_words,

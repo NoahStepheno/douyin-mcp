@@ -103,6 +103,7 @@ _SIGNALS_SCRIPT = (
   const riskText = /(滑块验证|拖动滑块|请完成验证|安全验证|人机验证|操作频繁|访问频繁|异常流量|检测到风险)/;
   const loginText = /(扫码登录|登录后查看|请先登录|手机号登录|验证码登录|登录后参与评论)/;
   const emptyText = /(暂无评论|还没有评论|来抢首评|暂时没有评论|还没有人评论)/;
+  const disabledText = /(评论已关闭|作者已关闭评论|评论功能已关闭|已关闭评论|该作品评论已关闭)/;
   const riskSelectors = [
     '#captcha_container', '[id*="captcha"]', '[class*="captcha"]',
     '[data-e2e*="captcha"]', '[class*="verify-wrap"]', '[class*="verifyModal"]'
@@ -117,6 +118,7 @@ _SIGNALS_SCRIPT = (
     risk_control_seen: riskElement || riskText.test(bodyText),
     login_wall: loginText.test(bodyText),
     empty_seen: emptyText.test(bodyText),
+    comments_disabled_seen: disabledText.test(bodyText),
     reply_button_seen: anchors.length > 0,
     reply_anchor_count: anchors.length,
     header_seen: /条评论|全部评论/.test(bodyText.slice(0, 8000)),
@@ -185,94 +187,127 @@ _EXTRACT_ITEMS_SCRIPT = (
     "() => {"
     + _JS_HELPERS
     + r"""
-  const anchors = replyAnchors();
-  const containers = [];
-  for (const anchor of anchors) {
-    let node = anchor.parentElement;
-    let best = null;
-    for (let depth = 0; node && depth < 14; depth++, node = node.parentElement) {
-      if (!node || !visible(node)) break;
-      const inside = anchors.filter(item => node.contains(item)).length;
-      if (inside > 1) break;
-      const text = textOf(node);
-      if (text.length >= 12 && text.length <= 4000) best = node;
-      if (/全部评论|条评论|暂无评论/.test(text)) break;
-    }
-    if (best) containers.push(best);
-  }
-  const unique = containers.filter((node, index) => containers.indexOf(node) === index);
-  const itemContainers = unique.filter(node =>
-    !unique.some(other => other !== node && node.contains(other))
+  // Fast scope when the stable data-e2e hook exists, semantic anchors otherwise.
+  const listScope = document.querySelector('[data-e2e="comment-list"]') || document;
+  const scopeAnchors = [...listScope.querySelectorAll('*')].filter(isReplyAnchor);
+  const anchors = scopeAnchors.length ? scopeAnchors : replyAnchors();
+
+  const timeScopeRe = /^(刚刚|\d+\s*(秒|分钟|小时|天|周|个月|年)前(\s*[·•]\s*\S+)?|(今天|昨天|前天)\s*\d{1,2}:\d{2}(\s*[·•]\s*\S+)?|\d{1,2}-\d{1,2}(\s+\d{1,2}:\d{2})?|\d{4}[-年]\d{1,2}[-月]\d{1,2}日?(\s+\d{1,2}:\d{2})?|\d{1,2}:\d{2})$/;
+  const tagsOf = item => [...new Set(
+    [...item.querySelectorAll('[class*="comment-item-tag"]')].map(el => textOf(el)).filter(Boolean)
+  )];
+  const nicknameOf = item => {
+    const anchor = item.querySelector('a[href*="/user/"]');
+    if (!anchor) return '';
+    const clone = anchor.cloneNode(true);
+    clone.querySelectorAll('[class*="comment-item-tag"], [class*="badge"]').forEach(el => el.remove());
+    return textOf(clone);
+  };
+  const stripNoise = text => norm(
+    String(text || '')
+      .replace(/作者赞过/g, ' ')
+      .replace(/^(置顶|作者)\s*/g, '')
+      .replace(/\s*(置顶|作者赞过)\s*$/g, '')
   );
 
-  const leafTexts = root => [...root.querySelectorAll('*')]
-    .filter(el => el.children.length === 0)
-    .map(el => norm(el.innerText))
-    .filter(Boolean);
-  const toCount = text => {
-    const cleaned = String(text || '').replace(/,/g, '');
-    const match = cleaned.match(/(\d+(?:\.\d+)?)\s*([万亿]?)/);
-    if (!match) return '';
-    return match[1] + (match[2] || '');
-  };
-  const items = itemContainers.map(node => {
-    const leaves = leafTexts(node);
-    const timeText = leaves.find(text => timeRe.test(text)) || '';
-    const replyLeaf = leaves.find(text => replyTextRe.test(text)) || '';
-    const reserved = new Set([timeText, replyLeaf, '置顶', '作者', '回复']);
-    const texts = leaves.filter(text =>
-      !reserved.has(text) && !timeRe.test(text) && !replyTextRe.test(text) &&
-      !countRe.test(text) && text !== '置顶' && text !== '作者'
-    );
-    texts.sort((a, b) => b.length - a.length);
-    const content = texts.length ? texts[0] : '';
-    const nicknameCandidates = texts.filter(text =>
-      text !== content && text.length <= 30 && !/[。！？!?]/.test(text)
-    );
-    const nickname = nicknameCandidates.length ? nicknameCandidates[nicknameCandidates.length - 1] : '';
-    const likeText = leaves.filter(text => countRe.test(text)).slice(-1)[0] || '';
-    const itemText = textOf(node);
-    let commentId = '';
-    let current = node;
-    for (let depth = 0; current && depth < 6; depth++, current = current.parentElement) {
-      const attributes = ['data-comment-id', 'data-id', 'data-commentid'];
-      for (const name of attributes) {
-        const value = current.getAttribute ? current.getAttribute(name) : '';
-        if (value) { commentId = value; break; }
+  const findContainer = anchor => {
+    let node = anchor.parentElement;
+    let fallback = null;
+    for (let depth = 0; node && depth < 12; depth++, node = node.parentElement) {
+      if (!node || !visible(node)) break;
+      const leaves = [...node.querySelectorAll('*')].filter(el => el.children.length === 0);
+      const inside = anchors.filter(item => node.contains(item)).length;
+      const hasTime = leaves.some(el => timeScopeRe.test(textOf(el)));
+      const userLinks = node.querySelectorAll('a[href*="/user/"]').length;
+      const text = textOf(node);
+      if (inside === 1 && hasTime && userLinks >= 1 && text.length <= 3000) {
+        return node;
       }
-      if (commentId) break;
-      if (current.id && /^\d{6,}$/.test(current.id)) { commentId = current.id; break; }
+      if (text.length >= 12 && text.length <= 3000) fallback = node;
+      if (inside > 1) break;
     }
+    return fallback;
+  };
+
+  const containers = [];
+  for (const anchor of anchors) {
+    const node = findContainer(anchor);
+    if (node && !containers.includes(node)) containers.push(node);
+  }
+  const itemContainers = containers.filter(node =>
+    !containers.some(other => other !== node && node.contains(other))
+  );
+
+  const items = itemContainers.map(node => {
+    const nickname = nicknameOf(node);
+    const leaves = [...node.querySelectorAll('*')].filter(el => el.children.length === 0);
+    const timeEl = leaves.find(el => timeScopeRe.test(textOf(el))) || null;
+    const timeText = timeEl ? textOf(timeEl) : '';
+    let content = '';
+    if (timeEl) {
+      let block = timeEl;
+      if (block.parentElement && block.parentElement.children.length === 1 &&
+          !timeScopeRe.test(textOf(block.parentElement))) {
+        block = block.parentElement;
+      }
+      let sib = block.previousElementSibling;
+      while (sib && !content) {
+        const text = textOf(sib);
+        if (text && !/^(作者|置顶)$/.test(text) && !/^(回复|分享)$/.test(text)) content = text;
+        sib = sib.previousElementSibling;
+      }
+    }
+    content = stripNoise(content);
+    if (nickname && content.startsWith(nickname)) content = content.slice(nickname.length).trim();
+    if (!content) {
+      const candidates = leaves
+        .map(el => stripNoise(textOf(el)))
+        .filter(text => text && text !== nickname && !timeScopeRe.test(text) &&
+          !/^(回复|分享|\d+|置顶|作者)$/.test(text) && !/互相关注/.test(text));
+      candidates.sort((a, b) => b.length - a.length);
+      content = candidates[0] || '';
+    }
+    const stats = node.querySelector('[class*="comment-item-stats-container"]');
+    const likeText = stats ? textOf(stats.querySelector('p')) : '';
+    const tags = tagsOf(node);
+    const replyEl = leaves.find(el => /^(回复|展开\s*\d+\s*条回复|\d+\s*条回复)$/.test(textOf(el)));
     return {
-      comment_id: commentId,
+      comment_id: '',
       content: content,
       nickname: nickname,
       like_text: likeText,
-      reply_text: replyLeaf,
+      reply_text: replyEl ? textOf(replyEl) : '',
       time_text: timeText,
-      is_pinned: /(^|\s)置顶/.test(itemText),
-      is_author_reply: [...node.querySelectorAll('*')].some(el =>
-        textOf(el) === '作者' && el.children.length === 0
-      )
+      is_pinned: /(^|\s)置顶/.test(textOf(node)),
+      is_author_reply: tags.includes('作者')
     };
   });
 
   const bodyText = textOf(document.body);
   const panel = findPanel(anchors);
-  const countSource = bodyText.slice(0, 8000);
-  const totalMatch = countSource.match(/(?:共\s*)?([\d][\d,.]*)\s*条评论/);
-  const totalCommentCount = totalMatch
-    ? Number(totalMatch[1].replace(/[,.]/g, ''))
-    : null;
+  let headerText = '';
+  const list = document.querySelector('[data-e2e="comment-list"]');
+  if (list && list.parentElement) {
+    const siblings = [...list.parentElement.children];
+    const index = siblings.indexOf(list);
+    headerText = siblings.slice(Math.max(0, index - 3), index).map(el => textOf(el)).join(' ');
+  }
+  // Only the header block is a trustworthy total source; never comment bodies.
+  if (!headerText.trim() && panel) {
+    const firstItem = panel.querySelector('[data-e2e="comment-item"]');
+    const panelText = textOf(panel);
+    headerText = firstItem ? '' : panelText.slice(0, 300);
+  }
+  const countSource = headerText.trim();
   const endText = /(没有更多评论|已显示全部评论|到底了|暂无更多评论)/;
   const moreText = /(展开更多|查看更多评论|加载更多评论|查看全部评论)/;
   return {
     reply_anchor_count: anchors.length,
-    panel_found: Boolean(panel),
+    panel_found: Boolean(panel) || Boolean(list),
     panel_text: panel ? textOf(panel).slice(0, 300) : '',
+    header_text: countSource.slice(0, 1200),
     empty_seen: /(暂无评论|还没有评论|来抢首评|暂时没有评论|还没有人评论)/.test(bodyText),
-    header_seen: /条评论|全部评论/.test(countSource),
-    total_comment_count: Number.isFinite(totalCommentCount) ? totalCommentCount : null,
+    comments_disabled_seen: /(评论已关闭|作者已关闭评论|评论功能已关闭|已关闭评论|该作品评论已关闭)/.test(bodyText),
     has_more_hint: endText.test(bodyText) ? false : (moreText.test(bodyText) ? true : null),
     items: items
   };

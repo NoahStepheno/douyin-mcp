@@ -34,13 +34,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from douyin_creator_mcp.browser.comment_panel import (  # noqa: E402
-    comment_trigger_summary,
     legacy_selector_counts,
     open_comment_panel,
     panel_outer_html,
     read_comment_items,
     read_page_signals,
 )
+from douyin_creator_mcp.browser.comments import parse_total_comment_count  # noqa: E402
 from douyin_creator_mcp.browser.extractors import collect_all_video_cards  # noqa: E402
 from douyin_creator_mcp.browser.session import BrowserSession  # noqa: E402
 from douyin_creator_mcp.compliance import (  # noqa: E402
@@ -187,7 +187,9 @@ class Probe:
                 "empty_seen": bool(observed.get("empty_seen")),
                 "header_seen": bool(observed.get("header_seen")),
                 "item_count": len(observed.get("items") or []),
-                "total_comment_count": observed.get("total_comment_count"),
+                "total_comment_count": parse_total_comment_count(
+                    observed.get("header_text")
+                ),
             },
             "final_url": str(getattr(page, "url", "") or ""),
         }

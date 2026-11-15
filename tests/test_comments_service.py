@@ -66,7 +66,7 @@ def test_normal_result_contract_and_insights(settings: Any) -> None:
 
     insights = result["insights"]
     assert insights["multi_label"] is True
-    assert insights["keyword_rule_version"] == "comment-keywords-v1"
+    assert insights["keyword_rule_version"] == "comment-keywords-v2"
     assert insights["excluded_author_replies"] == 1
     assert insights["total_comments"] == 2
     assert insights["categories"]["求链接"] == 1
@@ -507,3 +507,138 @@ def test_items_rendered_but_all_unparseable_is_parse_failed(settings: Any) -> No
     assert result["status"] == "parse_failed"
     assert result["error_code"] == "DOM_MISMATCH"
     assert result["comments"] == []
+
+
+def test_comments_disabled_is_not_completed_zero(settings: Any) -> None:
+    service, _ = build_service(
+        settings,
+        {
+            VIDEO_ID: make_observation(
+                [],
+                state="comments_disabled",
+                total_comment_count=None,
+                panel_found=False,
+            )
+        },
+    )
+    result = service.get_video_comments(VIDEO_ID)
+
+    assert result["status"] == "parse_failed"
+    assert result["error_code"] == "COMMENTS_DISABLED"
+    assert result["reason"] == "comments_disabled"
+    assert result["comments"] == []
+    assert "关闭" in result["message"]
+
+
+def test_declared_total_with_zero_items_is_parse_failed(settings: Any) -> None:
+    service, _ = build_service(
+        settings,
+        {
+            VIDEO_ID: make_observation(
+                [], total_comment_count=51, exhausted=True, panel_found=True
+            )
+        },
+    )
+    result = service.get_video_comments(VIDEO_ID)
+
+    assert result["status"] == "parse_failed"
+    assert result["error_code"] == "DOM_MISMATCH"
+    assert result["total"] == 0
+    assert result["total_comment_count"] == 51
+    assert any("51" in warning for warning in result["warnings"])
+
+
+def test_true_empty_state_is_completed_zero(settings: Any) -> None:
+    service, _ = build_service(
+        settings,
+        {
+            VIDEO_ID: make_observation(
+                [], state="empty", total_comment_count=0, exhausted=True
+            )
+        },
+    )
+    result = service.get_video_comments(VIDEO_ID)
+
+    assert result["status"] == "completed"
+    assert result["comments"] == []
+    assert result["total"] == 0
+    assert result["sampled"] is False
+    assert result["completeness"] == "complete"
+
+
+class FlakyNavigationExecutor:
+    """Raise navigation/context errors for the first N calls, then succeed."""
+
+    def __init__(self, observation: dict[str, Any], failures: int) -> None:
+        self.observation = observation
+        self.failures = failures
+        self.commands: list[Any] = []
+
+    def execute(self, command: Any) -> dict[str, Any]:
+        self.commands.append(command)
+        if len(self.commands) <= self.failures:
+            raise RuntimeError(
+                "Execution context was destroyed, most likely because of a navigation"
+            )
+        return self.observation
+
+
+def _service_with_executor(settings: Any, executor: Any, sleeps: list[float]):
+    from douyin_creator_mcp.services.comments import CommentsService
+
+    return CommentsService(
+        settings,
+        db=None,
+        browser_executor=executor,
+        now=lambda: NOW,
+        retry_delay=(1.25, 1.25),
+        sleep=sleeps.append,
+    )
+
+
+def test_navigation_race_retries_once_with_configured_delay(settings: Any) -> None:
+    observation = make_observation(
+        [make_comment("1", "原文呢，求发出来")],
+        total_comment_count=1,
+        exhausted=True,
+    )
+    executor = FlakyNavigationExecutor(observation, failures=1)
+    sleeps: list[float] = []
+    service = _service_with_executor(settings, executor, sleeps)
+
+    result = service.get_video_comments(VIDEO_ID)
+
+    assert result["status"] == "completed"
+    assert len(executor.commands) == 2
+    assert sleeps == [1.25]
+
+
+def test_navigation_race_second_failure_stays_retryable(settings: Any) -> None:
+    from douyin_creator_mcp.errors import AppError
+
+    executor = FlakyNavigationExecutor(make_observation(), failures=2)
+    sleeps: list[float] = []
+    service = _service_with_executor(settings, executor, sleeps)
+
+    with pytest.raises(AppError) as excinfo:
+        service.get_video_comments(VIDEO_ID)
+
+    assert excinfo.value.error_type == "navigation_race"
+    assert excinfo.value.retryable is True
+    assert len(executor.commands) == 2
+    assert sleeps == [1.25]
+
+
+def test_risk_control_does_not_trigger_navigation_retry(settings: Any) -> None:
+    service, executor = build_service(
+        settings,
+        {
+            VIDEO_ID: make_observation(
+                [], state="risk_control", total_comment_count=None
+            )
+        },
+    )
+    result = service.get_video_comments(VIDEO_ID)
+
+    assert result["status"] == "aborted_risk_control"
+    assert len(executor.commands) == 1

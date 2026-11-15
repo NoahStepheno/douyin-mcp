@@ -8,7 +8,9 @@ the response contract. No comment is persisted: v1 returns them directly.
 from __future__ import annotations
 
 import json
+import random
 import re
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
@@ -17,6 +19,7 @@ from zoneinfo import ZoneInfo
 from ..browser.comments import (
     COMMENT_PARSER_VERSION,
     MAX_COMMENT_LIMIT,
+    STATE_COMMENTS_DISABLED,
     STATE_EMPTY,
     STATE_LOGIN_REQUIRED,
     STATE_RISK_CONTROL,
@@ -24,7 +27,12 @@ from ..browser.comments import (
     collect_comments,
 )
 from ..browser.commands import CollectComments
-from ..errors import DATA_NOT_AVAILABLE, VALIDATION_ERROR, AppError
+from ..errors import (
+    DATA_NOT_AVAILABLE,
+    NAVIGATION_RACE,
+    VALIDATION_ERROR,
+    AppError,
+)
 from .browser_service import BROWSER_DEFAULT_ACCOUNT_ID
 from .comment_insights import build_insights, load_keyword_rules
 
@@ -32,6 +40,11 @@ SHANGHAI = ZoneInfo("Asia/Shanghai")
 COMMENT_GUARD_FILENAME = "comment_collection_guard.json"
 COMMENT_GUARD_VERSION = 1
 COMMENT_DAILY_LIMIT = 1
+#: Retry one navigation race, with a random cool-down to avoid hammering the
+#: platform. Tests inject a custom (min, max) and sleep recorder.
+NAVIGATION_RETRY_MIN_SECONDS = 2.0
+NAVIGATION_RETRY_MAX_SECONDS = 3.0
+NAVIGATION_RETRY_ATTEMPTS = 1
 RECENT_DEFAULT = 2
 RECENT_MAX = 20
 CURSOR_PATTERN = re.compile(r"^offset:(\d+)$")
@@ -53,6 +66,9 @@ RATE_LIMITED_MESSAGE = (
     "同一作品每天最多采集 1 次评论（本地频率限制），本次未重新访问评论页。"
 )
 REASON_MESSAGES = {
+    "comments_disabled": (
+        "该作品评论区已关闭（作者关闭了评论），没有可采集的评论。"
+    ),
     "panel_not_opened": (
         "未能打开评论面板（评论入口未命中或面板未渲染）。"
         "可先用 scripts/probe_comment_dom.py 在真实登录态下探路。"
@@ -133,6 +149,8 @@ class CommentsService:
         browser_executor: Any | None = None,
         now: Callable[[], datetime] | None = None,
         guard: CommentDailyGuard | None = None,
+        retry_delay: tuple[float, float] | None = None,
+        sleep: Callable[[float], None] | None = None,
     ) -> None:
         self.settings = settings
         self.db = db
@@ -141,6 +159,24 @@ class CommentsService:
         self._guard = guard or CommentDailyGuard(
             Path(settings.data_dir) / COMMENT_GUARD_FILENAME, now=self._now
         )
+        if retry_delay is None:
+            retry_min = float(
+                getattr(
+                    settings,
+                    "douyin_comment_nav_retry_min_seconds",
+                    NAVIGATION_RETRY_MIN_SECONDS,
+                )
+            )
+            retry_max = float(
+                getattr(
+                    settings,
+                    "douyin_comment_nav_retry_max_seconds",
+                    NAVIGATION_RETRY_MAX_SECONDS,
+                )
+            )
+            retry_delay = (retry_min, max(retry_min, retry_max))
+        self._retry_delay = retry_delay
+        self._sleep = sleep or time.sleep
 
     def get_video_comments(
         self,
@@ -228,20 +264,33 @@ class CommentsService:
         collected_at: datetime,
     ) -> dict[str, Any]:
         scan_limit = self._scan_limit(limit, keyword)
-        if self._browser_executor is not None:
-            return self._browser_executor.execute(
-                CollectComments(
-                    video_id=video_id,
-                    limit=scan_limit,
-                    cursor_offset=offset,
-                    collected_at=collected_at.isoformat(),
-                )
+        if self._browser_executor is None:
+            raise AppError(
+                DATA_NOT_AVAILABLE,
+                "浏览器执行器不可用，无法读取评论面板。",
+                retryable=True,
             )
-        raise AppError(
-            DATA_NOT_AVAILABLE,
-            "浏览器执行器不可用，无法读取评论面板。",
-            retryable=True,
+        command = CollectComments(
+            video_id=video_id,
+            limit=scan_limit,
+            cursor_offset=offset,
+            collected_at=collected_at.isoformat(),
         )
+        attempts = NAVIGATION_RETRY_ATTEMPTS + 1
+        for attempt in range(attempts):
+            try:
+                return self._browser_executor.execute(command)
+            except Exception as exc:
+                if not is_navigation_race(exc):
+                    raise
+                if attempt >= attempts - 1:
+                    raise AppError(
+                        NAVIGATION_RACE,
+                        "页面在采集过程中发生跳转/上下文销毁，已重试一次仍失败；"
+                        "该错误可稍后重试。",
+                        retryable=True,
+                    ) from exc
+                self._sleep(random.uniform(*self._retry_delay))
 
     def _build_result(
         self,
@@ -275,6 +324,23 @@ class CommentsService:
                 "has_more": False,
                 "next_cursor": None,
                 "insights": build_insights(comments, rules, rule_version),
+                "warnings": warnings,
+            }
+        if state == STATE_COMMENTS_DISABLED:
+            return {
+                **base,
+                "status": STATUS_PARSE_FAILED,
+                "error_code": "COMMENTS_DISABLED",
+                "reason": "comments_disabled",
+                "message": REASON_MESSAGES["comments_disabled"],
+                "comments": [],
+                "total": 0,
+                "total_comment_count": observation.get("total_comment_count"),
+                "sampled": None,
+                "completeness": "unknown",
+                "has_more": False,
+                "next_cursor": None,
+                "insights": build_insights([], rules, rule_version),
                 "warnings": warnings,
             }
         if state == STATE_LOGIN_REQUIRED:
@@ -343,10 +409,35 @@ class CommentsService:
             total_known=total_known,
             hit_limit=hit_limit or truncated_by_window,
         )
-        if state == STATE_EMPTY and not comments:
+        if state == STATE_EMPTY and not comments and not (total_known or 0):
             # Positive empty state is a complete answer even if the panel does
             # not render a numeric total.
             sampled, completeness = False, "complete"
+        if not comments and (total_known or 0) > 0:
+            # The panel declares N>0 comments but none parsed: structure drift.
+            warnings.append(
+                f"页面声明 {total_known} 条评论但解析到 0 条，按结构不匹配处理。"
+            )
+            return {
+                **base,
+                "status": STATUS_PARSE_FAILED,
+                "error_code": "DOM_MISMATCH",
+                "reason": (
+                    "panel_opened_but_no_items"
+                    if observation.get("panel_found") is not False
+                    else "selectors_not_matched"
+                ),
+                "message": REASON_MESSAGES["panel_opened_but_no_items"],
+                "comments": [],
+                "total": 0,
+                "total_comment_count": total_known,
+                "sampled": None,
+                "completeness": "unknown",
+                "has_more": False,
+                "next_cursor": None,
+                "insights": build_insights([], rules, rule_version),
+                "warnings": warnings,
+            }
 
         has_more = not exhausted
         next_cursor = None
@@ -672,3 +763,21 @@ class CommentsService:
                 "cursor 必须来自上一次返回的 next_cursor（形如 offset:50）。",
             )
         return int(match.group(1))
+
+
+def is_navigation_race(exc: BaseException) -> bool:
+    """Classify Playwright navigation/context teardown errors as retryable."""
+
+    if isinstance(exc, AppError):
+        return exc.error_type == NAVIGATION_RACE
+    message = " ".join(str(part) for part in (exc.args or ())) + " " + str(exc)
+    lowered = message.lower()
+    markers = (
+        "execution context was destroyed",
+        "most likely because of a navigation",
+        "context was destroyed",
+        "target page, context or browser has been closed",
+        "navigation",
+        "err_aborted",
+    )
+    return any(marker in lowered for marker in markers)

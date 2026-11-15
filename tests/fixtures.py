@@ -43,6 +43,7 @@ def make_observation(
     container_found: bool = True,
     panel_found: bool = True,
     reason: str | None = None,
+    final_url: str = "",
     read_count: int = 1,
 ) -> dict[str, Any]:
     materialized = list(items or [])
@@ -60,7 +61,8 @@ def make_observation(
         "total_comment_count": total_comment_count,
         "exhausted": exhausted,
         "read_count": read_count,
-        "parser_version": "comment-panel-v1",
+        "final_url": final_url,
+        "parser_version": "comment-panel-v2",
     }
 
 

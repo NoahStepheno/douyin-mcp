@@ -22,6 +22,7 @@ from .compliance import (
 from .config import ensure_runtime_dirs, load_settings
 from .responses import error_response, response_from_exception, success_response
 from .services.browser_service import BrowserService
+from .services.risk_state import RiskCooldown
 from .storage.db import Database
 
 
@@ -74,6 +75,16 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--format", choices=("json", "csv"), default="json")
     export.add_argument("--period", default="all")
     export.add_argument("--output")
+
+    clear_cooldown = commands.add_parser(
+        "clear-cooldown",
+        help="人工解除账号级风控冷却（仅人工调用，无自动清理路径）。",
+    )
+    clear_cooldown.add_argument(
+        "--yes",
+        action="store_true",
+        help="确认人工验证已通过并解除冷却。",
+    )
 
     purge = commands.add_parser("purge", help="删除数据库、报告、导出和专用浏览器 profile。")
     purge.add_argument("--yes", action="store_true", help="确认不可恢复地删除本地数据。")
@@ -218,6 +229,18 @@ def run_command(
         return success_response(checks=checks, ready=all(bool(value) for value in checks.values()))
     if args.command == "login":
         return _login(service, args.timeout, args.poll_interval, sleep_fn)
+    if args.command == "clear-cooldown":
+        if not args.yes:
+            return error_response(
+                "confirmation_required",
+                "clear-cooldown 会解除账号级风控冷却；请先人工确认验证已通过，再加 --yes。",
+                retryable=False,
+            )
+        cleared = RiskCooldown(service.settings.data_dir).clear()
+        return success_response(
+            cleared=cleared,
+            risk_cooldown=RiskCooldown(service.settings.data_dir).status(),
+        )
     if args.command == "status":
         return success_response(**service.get_status())
     if args.command == "sync":

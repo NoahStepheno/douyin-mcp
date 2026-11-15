@@ -42,6 +42,7 @@ import hashlib
 import re
 from datetime import datetime, timedelta
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 from zoneinfo import ZoneInfo
 
 from .comment_panel import (
@@ -85,6 +86,15 @@ def is_not_public_url(url: Any) -> bool:
     """True when Douyin redirected the public video URL to its 404 layer."""
 
     return bool(_NOT_PUBLIC_URL_RE.search(str(url or "")))
+
+
+def sanitize_final_url(url: Any) -> str:
+    """Return ``path?key1&key2`` for diagnostics, never query values."""
+
+    parsed = urlsplit(str(url or ""))
+    path = parsed.path or "/"
+    keys = sorted({key for key in parse_qs(parsed.query) if key})
+    return path + ("?" + "&".join(keys) if keys else "")
 
 
 def video_not_public_observation(video_id: str = "") -> dict[str, Any]:
@@ -523,5 +533,6 @@ def collect_comments(
         "total_comment_count": total_comment_count,
         "exhausted": exhausted,
         "read_count": read_count,
+        "final_url": str(getattr(page, "url", "") or ""),
         "parser_version": COMMENT_PARSER_VERSION,
     }

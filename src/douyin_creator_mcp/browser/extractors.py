@@ -10,6 +10,8 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
+from . import selectors
+
 
 LOGIN_REQUIRED = "login_required"
 VERIFICATION_REQUIRED = "verification_required"
@@ -80,6 +82,14 @@ _PAGE_STATE_SCRIPT = r"""
 
 _EXTRACT_VIDEO_CARDS_SCRIPT = r"""
 () => {
+  const CARD_SEL = __CARD_SEL__;
+  const TITLE_SEL = __TITLE_SEL__;
+  const TITLE_ALT_SEL = __TITLE_ALT_SEL__;
+  const STATUS_SEL = __STATUS_SEL__;
+  const METRIC_LABEL_SEL = __METRIC_LABEL_SEL__;
+  const METRIC_VALUE_SEL = __METRIC_VALUE_SEL__;
+  const COVER_SEL = __COVER_SEL__;
+  const statusWords = __STATUS_WORDS__;
   const dateRe = /20\d{2}.*\d{2}:\d{2}/;
   const durationRe = /^\d{2}:\d{2}(?::\d{2})?$/;
   const all = [...document.querySelectorAll('body *')];
@@ -91,15 +101,31 @@ _EXTRACT_VIDEO_CARDS_SCRIPT = r"""
   });
 
   const findCard = dateNode => {
-    const namedCard = dateNode.closest('[class*="video-card-content-"]');
-    if (namedCard) return namedCard;
+    const named =
+      dateNode.closest('article[class*="creator-work-card"]') ||
+      dateNode.closest('[class*="video-card-content"]') ||
+      dateNode.closest(CARD_SEL);
+    if (named) return named;
     let current = dateNode.parentElement;
-    for (let depth = 0; current && depth < 6; depth++, current = current.parentElement) {
-      const labels = current.querySelectorAll('[class*="metric-label-"]');
-      const title = current.querySelector('[class*="info-title-text-"]');
-      if (title && labels.length >= 2) return current;
+    for (let depth = 0; current && depth < 8; depth++, current = current.parentElement) {
+      const title = current.querySelector(TITLE_SEL) || current.querySelector(TITLE_ALT_SEL);
+      const labels = current.querySelectorAll(METRIC_LABEL_SEL);
+      if (title && (labels.length >= 2 || current.tagName === 'ARTICLE')) return current;
     }
     return null;
+  };
+
+  const statusOf = card => {
+    const node = card.querySelector(STATUS_SEL);
+    if (node) {
+      const text = (node.innerText || '').trim();
+      if (text) return text;
+    }
+    const text = (card.innerText || '').trim();
+    const found = statusWords.find(word => text.includes(word));
+    // 内容管理列表只列本账号作品；没有私密/审核字样即视为已发布（与旧版卡片
+    // 上的「已发布」一致），否则 visibility 会退化成 unknown。
+    return found || '已发布';
   };
 
   const cards = [];
@@ -109,8 +135,7 @@ _EXTRACT_VIDEO_CARDS_SCRIPT = r"""
     if (!card || seen.has(card)) continue;
     seen.add(card);
 
-    const titleNode = card.querySelector('[class*="info-title-text-"]');
-    const statusNode = card.querySelector('[class*="info-status-"]');
+    const titleNode = card.querySelector(TITLE_SEL) || card.querySelector(TITLE_ALT_SEL);
     const anchors = [...card.querySelectorAll('a[href]')];
     const detailAnchor = anchors.find(anchor =>
       /数据|详情|分析/.test((anchor.innerText || '').trim())
@@ -120,15 +145,15 @@ _EXTRACT_VIDEO_CARDS_SCRIPT = r"""
     const leafNodes = [...card.querySelectorAll('*')].filter(el => el.children.length === 0);
     const durationNode = leafNodes.find(el => durationRe.test((el.innerText || '').trim()));
     const metrics = {};
-    for (const labelNode of card.querySelectorAll('[class*="metric-label-"]')) {
+    for (const labelNode of card.querySelectorAll(METRIC_LABEL_SEL)) {
       const item = labelNode.parentElement;
-      const valueNode = item && item.querySelector('[class*="metric-value-"]');
+      const valueNode = item && item.querySelector(METRIC_VALUE_SEL);
       const label = (labelNode.innerText || '').trim();
       if (label && valueNode) metrics[label] = (valueNode.innerText || '').trim();
     }
 
     let coverUrl = null;
-    const image = card.querySelector('img[src]');
+    const image = card.querySelector(COVER_SEL);
     if (image) coverUrl = image.src;
     if (!coverUrl) {
       const backgroundNode = [...card.querySelectorAll('*')].find(el =>
@@ -144,7 +169,7 @@ _EXTRACT_VIDEO_CARDS_SCRIPT = r"""
       title: titleNode ? (titleNode.innerText || '').trim() : '',
       publish_time: (dateNode.innerText || '').trim(),
       duration: durationNode ? (durationNode.innerText || '').trim() : null,
-      status: statusNode ? (statusNode.innerText || '').trim() : null,
+      status: statusOf(card),
       cover_url: coverUrl,
       detail_url: detailAnchor ? detailAnchor.href : null,
       platform_item_id: detailAnchor ? (
@@ -532,7 +557,7 @@ def load_all_video_cards(
 
 
 def extract_structured_videos(page: Any) -> list[dict[str, Any]]:
-    raw_records = page.evaluate(_EXTRACT_VIDEO_CARDS_SCRIPT)
+    raw_records = page.evaluate(selectors.render(_EXTRACT_VIDEO_CARDS_SCRIPT))
     records: list[dict[str, Any]] = []
     for raw in raw_records if isinstance(raw_records, list) else []:
         if not isinstance(raw, dict):
@@ -592,6 +617,24 @@ def collect_all_video_cards(
     }
 
 
+def drop_implausible_zero_play(metrics: dict[str, Any]) -> dict[str, Any]:
+    """平台把「被隐藏的播放量」在详情页渲染成 `0`，而卡片上是 `-`。
+
+    有互动（赞/评/转/藏/涨粉）或完播率时，`0 播放` 不可能成立；此时把
+    `play_count` 置为 None（不猜真实值），原始 `"0"` 仍保留在 `raw_metrics` 里可审计。
+    真·零播放的新作品（无任何互动、无完播率）保持 0。
+    """
+    if metrics.get("play_count") != 0:
+        return metrics
+    engagement = any(
+        metrics.get(field)
+        for field in ("like_count", "comment_count", "share_count", "collect_count", "follower_gain")
+    )
+    if engagement or metrics.get("completion_rate") or metrics.get("five_second_completion_rate"):
+        metrics["play_count"] = None
+    return metrics
+
+
 def extract_detail_metrics(
     page: Any,
     expected_video: dict[str, Any] | None = None,
@@ -619,6 +662,8 @@ def extract_detail_metrics(
             metrics[field] = parse_watch_duration_seconds(raw_value)
         else:
             metrics[field] = parse_metric_count(raw_value)
+
+    drop_implausible_zero_play(metrics)
 
     identity_confirmed = expected_video is None
     if expected_video is not None:

@@ -9,6 +9,7 @@ import pytest
 
 from douyin_creator_mcp.browser.comments import (
     is_not_public_url,
+    is_redirected_from_video,
     parse_comment_time,
     parse_total_comment_count,
 )
@@ -151,3 +152,21 @@ def test_matched_terms_are_consistent_with_counts() -> None:
 )
 def test_is_not_public_url(url: str, expected: bool) -> None:
     assert is_not_public_url(url) is expected
+
+
+@pytest.mark.parametrize(
+    ("url", "video_id", "expected"),
+    [
+        # 非公开作品：请求 /video/<id> 被甩到推荐流（modal 是别的视频）
+        ("https://www.douyin.com/jingxuan?modal_id=7709150316960238875", "7708434433312853302", True),
+        # 正常落地：URL 里带请求的 id
+        ("https://www.douyin.com/video/7707861402739952923", "7707861402739952923", False),
+        # 带站内参数但 id 仍在
+        ("https://www.douyin.com/video/7707861402739952923?previous_page=creator", "7707861402739952923", False),
+        # 空值
+        ("", "7708434433312853302", False),
+        ("https://www.douyin.com/jingxuan?modal_id=1", "", False),
+    ],
+)
+def test_is_redirected_from_video(url: str, video_id: str, expected: bool) -> None:
+    assert is_redirected_from_video(url, video_id) is expected

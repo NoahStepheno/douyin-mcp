@@ -24,8 +24,10 @@ from ..browser.account_overview import (
     wait_for_account_overview,
 )
 from ..browser.comments import (
+    STATE_RISK_CONTROL,
     collect_comments,
     is_not_public_url,
+    is_redirected_from_video,
     video_not_public_observation,
 )
 from ..browser.extractors import (
@@ -54,6 +56,26 @@ from .commands import (
     SyncVideoDetails,
     VerifyAccount,
 )
+
+
+_ITEM_ID_IN_URL = re.compile(
+    r"(?:work-detail|video|item)[/\-](\d{6,})|"
+    r"(?:item_id|video_id|aweme_id|modal_id)=(\d{6,})"
+)
+
+
+def item_id_from_url(url: Any) -> str | None:
+    """Read the platform item id out of a creator detail URL.
+
+    The new work list no longer exposes ``<a href="...item_id=...">``; the only
+    way to learn a new work's id is opening its detail page and reading the
+    URL, e.g. ``/creator-micro/work-management/work-detail/<item_id>``.
+    """
+
+    match = _ITEM_ID_IN_URL.search(str(url or ""))
+    if not match:
+        return None
+    return match.group(1) or match.group(2)
 
 
 class BrowserBackend(Protocol):
@@ -126,6 +148,7 @@ class DefaultBrowserBackend:
             load_stats: dict[str, Any] = {}
             if initial["login_status"] == "logged_in":
                 videos, load_stats = collect_all_video_cards(page)
+                self._fill_missing_item_ids(session, videos)
             snapshot = extract_page_snapshot(page, videos, load_stats)
             return {"snapshot": snapshot, "videos": videos, "load_stats": load_stats}
         if isinstance(command, SyncVideoDetails):
@@ -154,12 +177,20 @@ class DefaultBrowserBackend:
             page = None
             try:
                 page = session.open_video_comments(command.video_id)
+                # 非公开作品会被 douyin 重定向到推荐流；那页没有评论区，headless 下
+                # 还会弹验证，误判成账号风控。先按 URL 判掉，别白撞也别冷却整批。
+                final_url = str(getattr(page, "url", "") or "")
+                if is_redirected_from_video(final_url, command.video_id):
+                    page.wait_for_timeout(2000)
+                    final_url = str(getattr(page, "url", "") or "")
+                    if is_redirected_from_video(final_url, command.video_id):
+                        return video_not_public_observation(command.video_id)
                 collected_at = (
                     datetime.fromisoformat(command.collected_at)
                     if command.collected_at
                     else None
                 )
-                return collect_comments(
+                observation = collect_comments(
                     page,
                     video_id=command.video_id,
                     limit=command.limit,
@@ -167,6 +198,15 @@ class DefaultBrowserBackend:
                     collected_at=collected_at,
                     settle_ms=max(0, self.settings.douyin_comment_settle_ms),
                 )
+                # 重定向到推荐流之后才弹的「验证」不是账号风控：那是非公开作品页
+                # 被甩到推荐流的副作用。判成 video_not_public，不冷却整批。
+                if observation.get("state") == STATE_RISK_CONTROL and (
+                    is_redirected_from_video(
+                        observation.get("final_url"), command.video_id
+                    )
+                ):
+                    return video_not_public_observation(command.video_id)
+                return observation
             except Exception:
                 # A 404 redirect can surface as a navigation/context error; the
                 # final URL is the authoritative signal. Do not retry or record
@@ -262,6 +302,49 @@ class DefaultBrowserBackend:
             self.close()
             return {"shutdown": True}
         raise AppError(VALIDATION_ERROR, f"Unsupported browser command: {type(command).__name__}")
+
+    def _fill_missing_item_ids(
+        self, session: BrowserSession, videos: list[dict[str, Any]]
+    ) -> None:
+        """Recover platform item ids the list DOM stopped exposing.
+
+        Known works are matched from the local database by (publish_time, title)
+        so no page is opened; only genuinely new works pay one detail-page visit
+        (the click target is the card title, which navigates to the detail URL).
+        """
+
+        for video in videos:
+            if video.get("platform_item_id"):
+                continue
+            if self.database is not None:
+                known = self.database.query_one(
+                    "SELECT video_id FROM videos WHERE publish_time = ? AND title = ? "
+                    "AND video_id IS NOT NULL LIMIT 1",
+                    (video.get("publish_time"), video.get("title")),
+                    read_only=True,
+                )
+                if known and known.get("video_id"):
+                    video["platform_item_id"] = str(known["video_id"])
+                    continue
+            try:
+                detail_page = session.open_video_detail_from_list(
+                    str(video.get("title") or ""), int(video["publish_time"])
+                )
+                detail_page.wait_for_timeout(1200)
+                detail_url = str(getattr(detail_page, "url", "") or "")
+                item_id = item_id_from_url(detail_url)
+                if item_id:
+                    video["platform_item_id"] = item_id
+                    if "/work-detail/" in detail_url:
+                        video["video_url"] = detail_url
+                try:
+                    detail_page.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            except Exception:  # noqa: BLE001
+                # A work without a reachable detail page keeps platform_item_id
+                # empty; the database still matches it by title and publish time.
+                continue
 
     def _verify_account_binding(
         self, account_id: str, videos: list[dict[str, Any]]

@@ -15,6 +15,9 @@ from ..errors import (
 )
 
 
+from . import selectors as _selectors
+
+
 def _load_sync_playwright() -> Any:
     try:
         from playwright.sync_api import sync_playwright
@@ -124,13 +127,14 @@ class BrowserSession:
 
         if len(matches) != 1:
             observed_candidates = list_page.evaluate(
+                _selectors.render(
                 """
                 expected => {
-                  const cards = [...document.querySelectorAll('[class*="video-card-content-"]')];
+                  const cards = [...document.querySelectorAll(__CARD_SEL__)];
                   const normalized = cards.map(card => {
-                    const titleNode = card.querySelector('[class*="info-title-text-"]') ||
-                      card.querySelector('[class*="info-title-operation-"]');
-                    const timeNode = card.querySelector('[class*="info-time-"]');
+                    const titleNode = card.querySelector(__TITLE_SEL__) ||
+                      card.querySelector(__TITLE_ALT_SEL__);
+                    const timeNode = card.querySelector(__TIME_SEL__);
                     return {
                       title: titleNode ? (titleNode.innerText || '').trim() : '',
                       publish_time: timeNode ? (timeNode.innerText || '').trim() : ''
@@ -146,7 +150,8 @@ class BrowserSession:
                       .map(item => item.publish_time)
                   };
                 }
-                """,
+                """
+                ),
                 {"title": expected_title, "publish_time": expected_time},
             )
             raise AppError(
@@ -224,13 +229,14 @@ class BrowserSession:
         previous_count = -1
         for _ in range(max_scrolls + 1):
             matches: list[tuple[Any, bool]] = []
-            cards = page.locator('[class*="video-card-content-"]')
+            cards = page.locator(_selectors.CARD_SEL)
             matching_indices = page.evaluate(
+                _selectors.render(
                 """
-                expected => [...document.querySelectorAll('[class*="video-card-content-"]')]
+                expected => [...document.querySelectorAll(__CARD_SEL__)]
                   .map((card, index) => {
-                    const titleNode = card.querySelector('[class*="info-title-text-"]') ||
-                      card.querySelector('[class*="info-title-operation-"]');
+                    const titleNode = card.querySelector(__TITLE_SEL__) ||
+                      card.querySelector(__TITLE_ALT_SEL__);
                     const title = titleNode ? (titleNode.innerText || '').trim() : '';
                     const text = (card.innerText || '').trim();
                     return title === expected.title && text.includes(expected.publish_time)
@@ -238,18 +244,19 @@ class BrowserSession:
                       : null;
                   })
                   .filter(index => index !== null)
-                """,
+                """
+                ),
                 {"title": expected_title, "publish_time": expected_time},
             )
             for index in matching_indices if isinstance(matching_indices, list) else []:
                 card = cards.nth(index)
-                title_nodes = card.locator('[class*="info-title-text-"]')
+                title_nodes = card.locator(_selectors.TITLE_SEL)
                 if title_nodes.count() == 0:
-                    title_nodes = card.locator('[class*="info-title-operation-"]')
+                    title_nodes = card.locator(_selectors.TITLE_ALT_SEL)
                 if title_nodes.count() == 0:
                     continue
                 title_node = title_nodes.nth(0)
-                operation_nodes = card.locator('[class*="info-title-operation-"]')
+                operation_nodes = card.locator(_selectors.TITLE_ALT_SEL)
                 container_class = str(
                     card.locator("..").get_attribute("class") or ""
                 )

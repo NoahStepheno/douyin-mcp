@@ -88,6 +88,26 @@ def is_not_public_url(url: Any) -> bool:
     return bool(_NOT_PUBLIC_URL_RE.search(str(url or "")))
 
 
+def is_redirected_from_video(url: Any, video_id: str) -> bool:
+    """True when ``/video/<video_id>`` landed somewhere else on douyin.
+
+    A video that is not publicly visible (private / restricted / deleted) makes
+    Douyin bounce the request to the recommendation feed
+    (``/jingxuan?modal_id=<another video>``). That page has no comment panel, and
+    in headless mode it also raises an anti-bot verification prompt, which used
+    to be misread as account-level risk control and re-armed the 12h cooldown.
+    2026-11-20: this is what "验证墙" was for five consecutive days.
+    """
+
+    vid = str(video_id or "").strip()
+    final = str(url or "").strip()
+    if not vid or not final:
+        return False
+    if vid in final:
+        return False
+    return "douyin.com" in final
+
+
 def sanitize_final_url(url: Any) -> str:
     """Return ``path?key1&key2`` for diagnostics, never query values."""
 

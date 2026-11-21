@@ -1722,6 +1722,7 @@ class BrowserService:
             return rows
         return self.db.query_all(
             "SELECT * FROM videos WHERE account_id = ? AND source = 'browser_dom' "
+            "AND is_active = 1 AND COALESCE(visibility, 'unknown') <> 'private' "
             "ORDER BY publish_time DESC, id ASC LIMIT ?",
             (account_id, recent_limit),
         )
